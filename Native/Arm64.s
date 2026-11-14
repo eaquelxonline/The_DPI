@@ -87,14 +87,16 @@ freedom_csum_fold:
 14:
     lsr     x6, x3, #32
     and     x3, x3, #0xffffffff
-    add     x3, x3, x6
+    add     x3, x3, x6                 // max 0x1_fffffffe (33 bits)
     lsr     x6, x3, #16
     and     x3, x3, #0xffff
-    add     x3, x3, x6
+    add     x3, x3, x6                 // max 0x2_fffe (18 bits)
     lsr     x6, x3, #16
     and     w0, w3, #0xffff
-    add     w0, w0, w6
+    add     w0, w0, w6                 // max 0x1_0001 (17 bits)
+    lsr     w6, w0, #16
     and     w0, w0, #0xffff
+    add     w0, w0, w6                 // max 0xffff (strictly <= 0xffff)
     ret
 
 .globl freedom_csum_delta

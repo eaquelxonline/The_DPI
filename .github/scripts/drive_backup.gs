@@ -7,7 +7,7 @@
 //   3. Dağıt -> Dağıtımları Yönet -> Kalem (Düzenle) -> Sürüm: Yeni Sürüm -> Dağıt.
 //
 // Özellikler:
-//   - Kaynak kodu (.zip) -> Drive "Proje_Yedek" klasörüne (hem Freedom_Network_Beta hem The_DPI_Beta)
+//   - Kaynak kodu (.zip) -> Drive "Proje_Yedek" klasörüne (Freedom_Network_Beta dalı)
 //   - Derlenmiş kurulum dosyaları (Windows EXE ZIP + Android APK) -> Drive "Son_Surum" klasörüne
 //   - Önce "latest-beta" GitHub Release varlıklarını, yoksa Actions Artifact API çıktılarını indirir
 //   - Eski sürümleri çöp kutusuna taşır (30 gün kurtarılabilir); yalnızca en son sürümü tutar.
@@ -15,7 +15,7 @@
 const DEFAULT_OWNER = 'eaquelxonline';
 const DEFAULT_REPO = 'Freedom_Network';
 const DEFAULT_BRANCH = 'Freedom_Network_Beta';
-const TRACKED_BRANCHES = ['Freedom_Network_Beta', 'The_DPI_Beta'];
+const TRACKED_BRANCHES = ['Freedom_Network_Beta'];
 const SOURCE_FOLDER = 'Proje_Yedek';
 const RELEASE_FOLDER = 'Son_Surum';
 const ROLLING_RELEASE_TAG = 'latest-beta';

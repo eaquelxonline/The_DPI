@@ -1749,6 +1749,671 @@ fun main() {
         }
     }
 
+    // ------------------------------------------------------------------ 40. 34-icon SVG vector engine & SwingVectorIcons offscreen rendering
+    test("40. Embedded 34-icon SVG path engine & SwingVectorIcons offscreen rasterization") {
+        expect(FreedomIconId.entries.size >= 34) { "Expected at least 34 embedded icons, got ${FreedomIconId.entries.size}" }
+        val expectedIds = listOf(
+            FreedomIconId.SHIELD_CHECK, FreedomIconId.SHIELD_OFF, FreedomIconId.RADAR,
+            FreedomIconId.SLIDERS, FreedomIconId.ACTIVITY, FreedomIconId.TERMINAL,
+            FreedomIconId.GLOBE, FreedomIconId.ZAP, FreedomIconId.REFRESH_CW,
+            FreedomIconId.ARROW_UP, FreedomIconId.ARROW_DOWN, FreedomIconId.CHEVRON_DOWN,
+        )
+        expectedIds.forEach { expect(it in FreedomIconId.entries) { "Missing icon id $it" } }
+
+        for (id in FreedomIconId.entries) {
+            val cmds = FreedomIconPaths.commands(id)
+            expect(cmds.isNotEmpty()) { "Icon $id must parse into SVG commands" }
+            val p2d = SwingVectorIcons.toPath2D(id)
+            val bounds = p2d.bounds2D
+            expect(!bounds.isEmpty && bounds.width > 0.0 && bounds.height > 0.0) {
+                "Icon $id Path2D bounds must be non-empty, got $bounds"
+            }
+
+            val img = java.awt.image.BufferedImage(24, 24, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+            val g2 = img.createGraphics()
+            g2.color = java.awt.Color(7, 11, 20)
+            g2.fillRect(0, 0, 24, 24)
+            SwingVectorIcons.asSwingIcon(id, size = 18, color = java.awt.Color(56, 189, 248)).paintIcon(null, g2, 3, 3)
+            g2.dispose()
+
+            var litPixels = 0
+            for (y in 0 until 24) {
+                for (x in 0 until 24) {
+                    val c = java.awt.Color(img.getRGB(x, y), true)
+                    if (c.blue > 100 || c.green > 80 || c.red > 50) litPixels++
+                }
+            }
+            expect(litPixels >= 4) { "Icon $id rendered too few visible pixels ($litPixels)" }
+        }
+    }
+
+    // ------------------------------------------------------------------ 41. GlobalCensorshipTelemetry parsers & Turkish summary report
+    test("41. GlobalCensorshipTelemetry JSON/trace parsers and Text.telemetryReport formatting") {
+        val cf = GlobalCensorshipTelemetry.parseCloudflareTrace(
+            "fl=123f\nip=198.51.100.42\nloc=TR\nwarp=plus\ncolo=IST\nsni=plaintext\nhttp=http/2\n",
+        )
+        expect(cf.ok) { "Cloudflare trace must parse OK" }
+        eq(cf.ip, "198.51.100.42", "cf.ip")
+        eq(cf.warp, "plus", "cf.warp")
+        eq(cf.loc, "TR", "cf.loc")
+        eq(cf.colo, "IST", "cf.colo")
+        eq(cf.http, "http/2", "cf.http")
+        expect(!GlobalCensorshipTelemetry.parseCloudflareTrace("").ok) { "Blank cf trace must report ok=false" }
+
+        val ripe = GlobalCensorshipTelemetry.parseRipeAtlasJson(
+            """{"count":42,"results":[{"id":1,"asn_v4":9121},{"id":2,"asn_v4":34984},{"id":3,"asn_v4":9121},{"id":4,"asn_v6":12735}]}""",
+            countryCode = "TR",
+            queryMs = 55L,
+        )
+        expect(ripe.ok) { "RIPE summary must parse OK" }
+        eq(ripe.connectedCount, 42, "ripe.connectedCount")
+        eq(ripe.distinctAsns, 3, "ripe.distinctAsns")
+        eq(ripe.sampleAsnNames, listOf("AS9121", "AS34984", "AS12735"), "ripe.sampleAsnNames")
+
+        val ooni = GlobalCensorshipTelemetry.parseOoniJson(
+            """
+            {
+              "results": [
+                {"probe_cc":"TR","probe_asn":"AS9121","test_name":"web_connectivity","input":"https://discord.com","anomaly":true,"confirmed":true,"failure":false,"measurement_start_time":"2026-11-14T10:00:00Z"},
+                {"probe_cc":"TR","probe_asn":"AS34984","test_name":"web_connectivity","input":"https://wikipedia.org","anomaly":true,"confirmed":false,"failure":false,"measurement_start_time":"2026-11-14T10:01:00Z"},
+                {"probe_cc":"TR","probe_asn":"AS12735","test_name":"signal","input":"","anomaly":false,"confirmed":false,"failure":false,"measurement_start_time":"2026-11-14T10:02:00Z"}
+              ]
+            }
+            """.trimIndent(),
+        )
+        eq(ooni.size, 3, "ooni measurements count")
+        expect(ooni[0].confirmed && ooni[0].anomaly && ooni[0].input == "https://discord.com") { "First OONI item mismatch" }
+        expect(!ooni[1].confirmed && ooni[1].anomaly) { "Second OONI item mismatch" }
+        expect(!ooni[2].confirmed && !ooni[2].anomaly && ooni[2].testName == "signal") { "Third OONI item mismatch" }
+
+        val mlab = GlobalCensorshipTelemetry.parseMlabLocateJson(
+            """{"results":[{"machine":"ndt-mlab1-ist01.mlab-oti.measurement-lab.org","city":"Istanbul","country":"TR"}]}""",
+            queryMs = 28L,
+        )
+        expect(mlab.ok) { "M-Lab node must parse OK" }
+        eq(mlab.site, "ist01", "mlab.site")
+        eq(mlab.city, "Istanbul", "mlab.city")
+        expect(!GlobalCensorshipTelemetry.parseMlabLocateJson("""{"results":[]}""", 10L).ok) { "Empty M-Lab results must be ok=false" }
+
+        val okSnap = GlobalTelemetrySnapshot(1L, ripe, ooni, 33L, ooniOk = true, ooniError = "", mlab = mlab, cloudflare = cf)
+        val okText = Text.telemetryReport(okSnap)
+        expect("RIPE Atlas : 42" in okText && "AS9121" in okText) { "RIPE missing from telemetry report: $okText" }
+        expect("[ENGEL]" in okText && "[ANOMALİ]" in okText && "[NORMAL]" in okText) { "OONI tags missing: $okText" }
+        expect("M-Lab Düğüm: ndt-mlab1-ist01" in okText && "Cloudflare : IP=198.51.100.42" in okText) { "M-Lab/CF missing: $okText" }
+
+        val errSnap = GlobalTelemetrySnapshot(
+            collectedAtMs = 2L,
+            ripe = RipeProbeSummary("TR", 0, 0, emptyList(), 0L, ok = false, error = "ağ hatası"),
+            ooni = emptyList(),
+            ooniQueryMs = 0L,
+            ooniOk = false,
+            ooniError = "zaman aşımı",
+            mlab = MlabServerInfo("", "", "", "", 0L, ok = false, error = "yok"),
+            cloudflare = CloudflareTraceInfo("", "", "", "", "", "", ok = false, error = "tls hatası"),
+        )
+        val errText = Text.telemetryReport(errSnap)
+        expect("erişilemedi (ağ hatası)" in errText && "erişilemedi (zaman aşımı)" in errText && "erişilemedi (tls hatası)" in errText) {
+            "Error telemetry report incomplete: $errText"
+        }
+    }
+
+    // ------------------------------------------------------------------ 42. IpPackets HTTP line bounding, Alt-Svc stripping & leak vs persona separation
+    test("42. IpPackets bounded HTTP line reader, Alt-Svc h3 response stripper, and persona vs leak accounting") {
+        val overlong = ("A".repeat(9000) + "\r\nNEXT_LINE\r\n").toByteArray(Charsets.US_ASCII)
+        val bais = java.io.ByteArrayInputStream(overlong)
+        val firstLine = IpPackets.readBoundedHttpLine(bais, maxLen = 8192)
+        eq(firstLine.length, 8192, "readBoundedHttpLine must cap buffer at 8192 without discarding remainder")
+        eq(IpPackets.readBoundedHttpLine(bais, maxLen = 8192), "NEXT_LINE", "Drained remainder allows reading NEXT_LINE cleanly")
+
+        val h3Resp = ("HTTP/1.1 200 OK\r\nServer: test\r\nAlt-Svc: h3=\":443\"; ma=86400\r\nContent-Length: 10\r\n\r\nHELLO_BODY")
+            .toByteArray(Charsets.ISO_8859_1)
+        val (strippedH3, h3Changed) = IpPackets.stripPlainHttpAltSvc(h3Resp)
+        expect(h3Changed) { "Alt-Svc h3 header must be stripped" }
+        val h3Text = String(strippedH3, Charsets.ISO_8859_1)
+        expect("alt-svc" !in h3Text.lowercase(java.util.Locale.US)) { "Alt-Svc h3 line must be removed: $h3Text" }
+        expect("Server: test" in h3Text && h3Text.endsWith("\r\n\r\nHELLO_BODY")) { "Other headers & body must stay intact: $h3Text" }
+
+        val h2OnlyResp = "HTTP/1.1 200 OK\r\nAlt-Svc: h2=\":443\"; ma=86400\r\n\r\nOK".toByteArray(Charsets.ISO_8859_1)
+        val (_, h2Changed) = IpPackets.stripPlainHttpAltSvc(h2OnlyResp)
+        expect(!h2Changed) { "Non-h3 Alt-Svc must not be flagged as stripped" }
+
+        val tlsBinary = byteArrayOf(0x16, 0x03, 0x03, 0x00, 0x10) + ByteArray(16)
+        expect(!IpPackets.stripPlainHttpAltSvc(tlsBinary).second) { "Binary TLS bytes must remain untouched" }
+
+        // Bug #28: Persona spoofing alone must NOT set leakBlocked=true
+        val personaOnlyReq = "GET /page?clean=1 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0 RealOS\r\n\r\n"
+            .toByteArray(Charsets.ISO_8859_1)
+        val pRes = IpPackets.sanitizePlainHttpHeadersDetailed(
+            personaOnlyReq,
+            persona = DevicePersona.IPHONE_19_BETA,
+            stripGeoHeaders = true,
+            stripTrackingParams = true,
+        )
+        expect(pRes.modified && pRes.personaApplied) { "Persona spoofing should mark modified & personaApplied" }
+        expect(!pRes.leakBlocked && !pRes.paramsStripped) { "Persona spoofing alone must not inflate leakBlocked/paramsStripped" }
+
+        val leakReq = "GET /page?utm_source=x&ok=1 HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-For: 203.0.113.5\r\n\r\n"
+            .toByteArray(Charsets.ISO_8859_1)
+        val lRes = IpPackets.sanitizePlainHttpHeadersDetailed(leakReq, persona = DevicePersona.OFF, stripGeoHeaders = true, stripTrackingParams = true)
+        expect(lRes.modified && lRes.leakBlocked && lRes.paramsStripped && !lRes.personaApplied) {
+            "XFF + tracking param request must report leakBlocked=true, paramsStripped=true, personaApplied=false"
+        }
+    }
+
+    // ------------------------------------------------------------------ 43. TunBridge WARP stateful firewall + 32-bit sequence wraparound
+    test("43. TunBridge stateful WARP inbound firewall and TcpFlow 32-bit sequence wraparound") {
+        DiagnosticSession(fastConfig).use { s ->
+            val appToBridgeIn = java.io.PipedInputStream(65536)
+            val appToBridgeOut = java.io.PipedOutputStream(appToBridgeIn)
+            val bridgeToAppIn = java.io.PipedInputStream(65536)
+            val bridgeToAppOut = java.io.PipedOutputStream(bridgeToAppIn)
+
+            fun readNextIp(input: java.io.InputStream): ByteArray {
+                val hdr = ByteArray(20)
+                var read = 0
+                while (read < 20) {
+                    val n = input.read(hdr, read, 20 - read)
+                    if (n < 0) error("EOF")
+                    read += n
+                }
+                val totalLen = IpPackets.u16(hdr, 2)
+                val full = ByteArray(totalLen)
+                System.arraycopy(hdr, 0, full, 0, 20)
+                while (read < totalLen) {
+                    val n = input.read(full, read, totalLen - read)
+                    if (n < 0) error("EOF")
+                    read += n
+                }
+                return full
+            }
+
+            ServerSocket(0, 8, InetAddress.getLoopbackAddress()).use { echoSrv ->
+                echoSrv.soTimeout = 4000
+                val sawCleanEofAfterWrap = AtomicBoolean(false)
+                val originReceived = AtomicReference("")
+                val srvThread = Thread {
+                    echoSrv.accept().use { c ->
+                        c.soTimeout = 3000
+                        val data = c.inputStream.readAllBytes()
+                        originReceived.set(String(data, Charsets.US_ASCII))
+                        sawCleanEofAfterWrap.set(true)
+                        c.outputStream.write("WRAP_OK".toByteArray(Charsets.US_ASCII))
+                        c.outputStream.flush()
+                    }
+                }.apply { isDaemon = true; start() }
+
+                val clientIp = IpPackets.parseIpLiteral(TunBridge.VPN_CLIENT_IP)!!
+                val warpIp = IpPackets.parseIpLiteral("172.16.0.2")!!
+                val peerIp = IpPackets.parseIpLiteral("93.184.216.34")!!
+                val loopbackIp = IpPackets.parseIpLiteral("127.0.0.1")!!
+
+                TunBridge(
+                    session = s,
+                    tunInput = appToBridgeIn,
+                    tunOutput = bridgeToAppOut,
+                ).use { bridge ->
+                    // 1) Stateful inbound WARP firewall verification
+                    val unsolicitedTcp = IpPackets.buildIpv4Tcp(peerIp, warpIp, 443, 55111, 100L, 1L, IpPackets.TCP_SYN or IpPackets.TCP_ACK)
+                    val unsolicitedUdp = IpPackets.buildIpv4Udp(peerIp, warpIp, 5353, 55112, byteArrayOf(1, 2, 3, 4))
+                    expect(!bridge.isAllowedWarpInbound(unsolicitedTcp)) { "Unsolicited inbound TCP over WARP must be blocked" }
+                    expect(!bridge.isAllowedWarpInbound(unsolicitedUdp)) { "Unsolicited inbound UDP over WARP must be blocked" }
+
+                    val outTcp = IpPackets.buildIpv4Tcp(warpIp, peerIp, 55111, 443, 50L, 0L, IpPackets.TCP_SYN)
+                    val outUdp = IpPackets.buildIpv4Udp(warpIp, peerIp, 55112, 443, byteArrayOf(9, 8, 7))
+                    bridge.recordWarpOutbound(outTcp)
+                    bridge.recordWarpOutbound(outUdp)
+                    expect(bridge.isAllowedWarpInbound(unsolicitedTcp)) { "Matching tracked inbound TCP over WARP must be allowed" }
+                    val matchingUdpReply = IpPackets.buildIpv4Udp(peerIp, warpIp, 443, 55112, byteArrayOf(5, 6))
+                    expect(bridge.isAllowedWarpInbound(matchingUdpReply)) { "Matching tracked inbound UDP over WARP must be allowed" }
+                    expect(!bridge.isAllowedWarpInbound(unsolicitedUdp)) { "Mismatched srcPort UDP reply must still be rejected" }
+
+                    // 2) TCP 32-bit sequence number wraparound across 0xFFFFFFFFL boundary (0xFFFFFFF8 + 1 (SYN) + 10 (DATA) + 1 (FIN))
+                    bridge.start()
+                    val iss = 0xFFFFFFF8L
+                    appToBridgeOut.write(IpPackets.buildIpv4Tcp(clientIp, loopbackIp, 57123, echoSrv.localPort, iss, 0L, IpPackets.TCP_SYN))
+                    appToBridgeOut.flush()
+                    val synAck = IpPackets.parseTcp(readNextIp(bridgeToAppIn))!!
+                    eq(synAck.ack, 0xFFFFFFF9L, "SYN+ACK ack after iss=0xFFFFFFF8")
+
+                    val payload = "WRAP_12345".toByteArray(Charsets.US_ASCII) // 10 bytes -> next seq = 3L
+                    appToBridgeOut.write(
+                        IpPackets.buildIpv4Tcp(
+                            clientIp, loopbackIp, 57123, echoSrv.localPort,
+                            0xFFFFFFF9L, (synAck.seq + 1L) and 0xFFFFFFFFL,
+                            IpPackets.TCP_PSH or IpPackets.TCP_ACK, payload = payload,
+                        ),
+                    )
+                    appToBridgeOut.flush()
+                    val dataAck = IpPackets.parseTcp(readNextIp(bridgeToAppIn))!!
+                    eq(dataAck.ack, 3L, "32-bit wraparound ack must equal 3L")
+
+                    // Client FIN at seq=3L must advance clientNextSeq to 4L and close upstream output so server reads EOF
+                    appToBridgeOut.write(
+                        IpPackets.buildIpv4Tcp(
+                            clientIp, loopbackIp, 57123, echoSrv.localPort,
+                            3L, (synAck.seq + 1L) and 0xFFFFFFFFL,
+                            IpPackets.TCP_FIN or IpPackets.TCP_ACK,
+                        ),
+                    )
+                    appToBridgeOut.flush()
+                    var serverResp = ""
+                    var sawFinAck = false
+                    for (step in 0 until 6) {
+                        val seg = IpPackets.parseTcp(readNextIp(bridgeToAppIn)) ?: continue
+                        if (seg.ack == 4L) sawFinAck = true
+                        if (seg.payload.isNotEmpty()) serverResp += String(seg.payload, Charsets.US_ASCII)
+                        if (sawFinAck && serverResp == "WRAP_OK") break
+                    }
+                    srvThread.join(2500)
+                    expect(sawFinAck) { "FIN after 32-bit wraparound must be ACKed with seq 4L" }
+                    expect(sawCleanEofAfterWrap.get()) { "Server must observe clean EOF from wrapped FIN" }
+                    eq(originReceived.get(), "WRAP_12345", "Origin must receive exact payload")
+                    eq(serverResp, "WRAP_OK", "Client must receive server response after FIN")
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ 44. WindowsNextGenProxy zero-leak guarantees & live updateSettings
+    test("44. WindowsNextGenProxy WARP pre-handshake barrier, CUSTOM_RELAY zero-DNS/fail-closed, live settings & Alt-Svc accounting") {
+        // 1) CUSTOM_RELAY zero-DNS leak + fail-closed
+        val relayDohCalls = AtomicInteger(0)
+        val fakeDoh = object : DohClient {
+            override fun post(url: String, body: ByteArray, timeoutMs: Int): DohResponse {
+                relayDohCalls.incrementAndGet()
+                return DohResponse(1, 100, EncProtocol.DOH, dnsAnswer(body, byteArrayOf(127, 0, 0, 1)))
+            }
+        }
+        val relayTargetSeen = AtomicReference("")
+        ServerSocket(0, 8, InetAddress.getLoopbackAddress()).use { origin ->
+            origin.soTimeout = 4000
+            val originThread = Thread {
+                while (!origin.isClosed) {
+                    val c = try { origin.accept() } catch (_: Throwable) { break }
+                    Thread {
+                        c.use { s ->
+                            val buf = ByteArray(1024)
+                            val n = runCatching { s.inputStream.read(buf) }.getOrDefault(-1)
+                            if (n > 0) {
+                                s.outputStream.write("RELAY_PONG".toByteArray(Charsets.US_ASCII))
+                                s.outputStream.flush()
+                            }
+                        }
+                    }.apply { isDaemon = true; start() }
+                }
+            }.apply { isDaemon = true; start() }
+
+            ServerSocket(0, 8, InetAddress.getLoopbackAddress()).use { relaySrv ->
+                relaySrv.soTimeout = 4000
+                val relayThread = Thread {
+                    relaySrv.accept().use { c ->
+                        val rIn = c.inputStream
+                        val sb = StringBuilder()
+                        while (!sb.endsWith("\r\n\r\n")) {
+                            val ch = rIn.read()
+                            if (ch < 0) break
+                            sb.append(ch.toChar())
+                        }
+                        relayTargetSeen.set(sb.toString().lineSequence().firstOrNull().orEmpty())
+                        Socket(InetAddress.getLoopbackAddress(), origin.localPort).use { up ->
+                            c.outputStream.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
+                            c.outputStream.flush()
+                            val f = Thread { runCatching { rIn.transferTo(up.outputStream); up.shutdownOutput() } }.apply { isDaemon = true; start() }
+                            runCatching { up.inputStream.transferTo(c.outputStream); c.outputStream.flush() }
+                            f.join(1500)
+                        }
+                    }
+                }.apply { isDaemon = true; start() }
+
+                WindowsNextGenProxy(
+                    port = 0,
+                    routeMode = WindowsRouteMode.CUSTOM_RELAY,
+                    customRelayUri = "http://127.0.0.1:${relaySrv.localPort}",
+                    dohClient = fakeDoh,
+                    forceDirectForLoopback = false,
+                ).use { relayProxy ->
+                    val pPort = relayProxy.start()
+                    Socket(InetAddress.getLoopbackAddress(), pPort).use { c ->
+                        c.soTimeout = 3000
+                        c.outputStream.write("CONNECT zero.dns.leak.invalid:${origin.localPort} HTTP/1.1\r\nHost: zero.dns.leak.invalid:${origin.localPort}\r\n\r\n".toByteArray())
+                        c.outputStream.flush()
+                        val hb = StringBuilder()
+                        while (!hb.endsWith("\r\n\r\n")) {
+                            val b = c.inputStream.read()
+                            if (b < 0) break
+                            hb.append(b.toChar())
+                        }
+                        expect("200" in hb.toString()) { "Relay CONNECT should return 200: $hb" }
+                        c.outputStream.write("PING".toByteArray())
+                        c.outputStream.flush()
+                        val resp = String(c.inputStream.readAllBytes(), Charsets.US_ASCII)
+                        eq(resp, "RELAY_PONG", "Traffic should pass through custom HTTP relay")
+                    }
+                    eq(relayDohCalls.get(), 0, "CUSTOM_RELAY must perform zero local DoH/DNS lookups")
+                    eq(relayTargetSeen.get(), "CONNECT zero.dns.leak.invalid:${origin.localPort} HTTP/1.1", "Relay must receive target hostname intact")
+
+                    // Fail-closed when relay URI cleared live
+                    relayProxy.updateSettings(customRelayUri = "")
+                    expect(!relayProxy.isIpMasked) { "Clearing customRelayUri must mark isIpMasked=false" }
+                    Socket(InetAddress.getLoopbackAddress(), pPort).use { c ->
+                        c.soTimeout = 2000
+                        c.outputStream.write("CONNECT failclosed.invalid:443 HTTP/1.1\r\n\r\n".toByteArray())
+                        c.outputStream.flush()
+                        val failResp = runCatching { String(c.inputStream.readAllBytes(), Charsets.US_ASCII) }.getOrDefault("")
+                        expect("200" !in failResp) { "Fail-closed CUSTOM_RELAY must never return 200 or fall back direct" }
+                    }
+                    eq(relayDohCalls.get(), 0, "Fail-closed CUSTOM_RELAY must still perform zero DNS lookups")
+                }
+                relayThread.join(1500)
+            }
+
+            // 2) AUTO_WARP pre-handshake barrier (Bug #22)
+            val warpEntered = CountDownLatch(1)
+            val warpGate = CountDownLatch(1)
+            val barrierDohCalls = AtomicInteger(0)
+            val barrierDoh = object : DohClient {
+                override fun post(url: String, body: ByteArray, timeoutMs: Int): DohResponse {
+                    barrierDohCalls.incrementAndGet()
+                    return DohResponse(1, 50, EncProtocol.DOH, dnsAnswer(body, byteArrayOf(127, 0, 0, 1)))
+                }
+            }
+            val fakeWarpId = WarpIdentity(
+                privateKeyB64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                peerPublicKeyB64 = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+                clientIpv4 = "172.16.0.2",
+                endpointHost = "127.0.0.1",
+                endpointPort = 2408,
+            )
+            WindowsNextGenProxy(
+                port = 0,
+                routeMode = WindowsRouteMode.AUTO_WARP,
+                dohEndpoints = listOf("https://1.1.1.1/dns-query"),
+                dohClient = barrierDoh,
+                warpIdentityOverride = fakeWarpId,
+                warpFactory = { id ->
+                    warpEntered.countDown()
+                    warpGate.await(3000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    // Close immediately so WarpTunnel.connect exits instantaneously without sleeping 3.2s
+                    WarpTunnel(id).apply { close() }
+                },
+                forceDirectForLoopback = false,
+                allowLoopbackDns = true,
+            ).use { warpProxy ->
+                val wPort = warpProxy.start()
+                expect(warpEntered.await(2000, java.util.concurrent.TimeUnit.MILLISECONDS)) { "bootstrapAutoWarp must enter warpFactory" }
+                val clientDone = CountDownLatch(1)
+                val clientBanner = AtomicReference("")
+                val clientThread = Thread {
+                    runCatching {
+                        Socket(InetAddress.getLoopbackAddress(), wPort).use { c ->
+                            c.soTimeout = 4000
+                            c.outputStream.write("CONNECT barrier.example:${origin.localPort} HTTP/1.1\r\nHost: barrier.example:${origin.localPort}\r\n\r\n".toByteArray())
+                            c.outputStream.flush()
+                            val hb = StringBuilder()
+                            while (!hb.endsWith("\r\n\r\n")) {
+                                val b = c.inputStream.read()
+                                if (b < 0) break
+                                hb.append(b.toChar())
+                            }
+                            clientBanner.set(hb.toString())
+                        }
+                    }
+                    clientDone.countDown()
+                }.apply { isDaemon = true; start() }
+
+                Thread.sleep(160)
+                eq(barrierDohCalls.get(), 0, "Zero DNS lookups may execute while AUTO_WARP handshake is bootstrapping")
+                expect(clientDone.count > 0L) { "Client connection must be held by pre-handshake barrier until WARP settles" }
+
+                warpGate.countDown()
+                expect(clientDone.await(3500, java.util.concurrent.TimeUnit.MILLISECONDS)) { "Client must proceed immediately once WARP settles" }
+                clientThread.join(1000)
+                expect("200" in clientBanner.get()) { "Fallback after WARP barrier should succeed: ${clientBanner.get()}" }
+                expect(barrierDohCalls.get() >= 1) { "DoH resolves only after WARP bootstrap settles" }
+            }
+
+            // 3) Bug #25 live updateSettings & Bug #28 Alt-Svc stripping / persona-only leak accounting
+            val upstreamRequests = java.util.Collections.synchronizedList(ArrayList<String>())
+            val sendAltSvc = AtomicBoolean(true)
+            ServerSocket(0, 8, InetAddress.getLoopbackAddress()).use { httpSrv ->
+                httpSrv.soTimeout = 4000
+                val httpThread = Thread {
+                    while (!httpSrv.isClosed) {
+                        val c = try { httpSrv.accept() } catch (_: Throwable) { break }
+                        Thread {
+                            c.use { s ->
+                                s.soTimeout = 2000
+                                val sb = StringBuilder()
+                                while (!sb.endsWith("\r\n\r\n")) {
+                                    val ch = s.inputStream.read()
+                                    if (ch < 0) break
+                                    sb.append(ch.toChar())
+                                }
+                                upstreamRequests.add(sb.toString())
+                                val altHdr = if (sendAltSvc.get()) "Alt-Svc: h3=\":443\"; ma=86400\r\n" else ""
+                                s.outputStream.write(("HTTP/1.1 200 OK\r\n${altHdr}Content-Length: 2\r\nConnection: close\r\n\r\nOK").toByteArray())
+                                s.outputStream.flush()
+                            }
+                        }.apply { isDaemon = true; start() }
+                    }
+                }.apply { isDaemon = true; start() }
+
+                WindowsNextGenProxy(
+                    port = 0,
+                    routeMode = WindowsRouteMode.HYBRID_DPI,
+                    persona = DevicePersona.IPHONE_19_BETA,
+                    blockTrackers = true,
+                    stripUrlParams = true,
+                    blockQuicAndLeaks = true,
+                    dohEndpoints = listOf("https://1.1.1.1/dns-query"),
+                    dohClient = fakeDoh,
+                    allowLoopbackDns = true,
+                ).use { proxy ->
+                    val pPort = proxy.start()
+
+                    // Request A: Persona spoofing with Alt-Svc=off -> leaksBlocked stays 0 (Bug #28)
+                    sendAltSvc.set(false)
+                    Socket(InetAddress.getLoopbackAddress(), pPort).use { s ->
+                        s.soTimeout = 3000
+                        s.outputStream.write("GET http://127.0.0.1:${httpSrv.localPort}/a?keep=1 HTTP/1.1\r\nHost: 127.0.0.1:${httpSrv.localPort}\r\nUser-Agent: RealClient\r\n\r\n".toByteArray())
+                        s.outputStream.flush()
+                        val resp = String(s.inputStream.readAllBytes(), Charsets.US_ASCII)
+                        expect(resp.endsWith("OK")) { "Plain HTTP persona request failed: $resp" }
+                    }
+                    eq(proxy.leaksBlocked.get(), 0L, "Persona UA rewrite alone must not increment leaksBlocked")
+                    expect("iPhone19,3" in upstreamRequests.last()) { "Persona should be applied on request A" }
+
+                    // Request B: Response contains Alt-Svc: h3 -> stripped before client & leaksBlocked == 1
+                    sendAltSvc.set(true)
+                    Socket(InetAddress.getLoopbackAddress(), pPort).use { s ->
+                        s.soTimeout = 3000
+                        s.outputStream.write("GET http://127.0.0.1:${httpSrv.localPort}/b HTTP/1.1\r\nHost: 127.0.0.1:${httpSrv.localPort}\r\nUser-Agent: RealClient\r\n\r\n".toByteArray())
+                        s.outputStream.flush()
+                        val resp = String(s.inputStream.readAllBytes(), Charsets.US_ASCII)
+                        expect("alt-svc" !in resp.lowercase(java.util.Locale.US) && resp.endsWith("OK")) {
+                            "Alt-Svc h3 must be stripped from plain HTTP response: $resp"
+                        }
+                    }
+                    eq(proxy.leaksBlocked.get(), 1L, "Alt-Svc h3 response strip must increment leaksBlocked to 1")
+
+                    // Tracker domain is blocked with 403 while blockTrackers=true
+                    Socket(InetAddress.getLoopbackAddress(), pPort).use { s ->
+                        s.soTimeout = 3000
+                        s.outputStream.write("GET http://doubleclick.net:${httpSrv.localPort}/blocked HTTP/1.1\r\nHost: doubleclick.net:${httpSrv.localPort}\r\n\r\n".toByteArray())
+                        s.outputStream.flush()
+                        val resp = String(s.inputStream.readAllBytes(), Charsets.US_ASCII)
+                        expect("403 Forbidden" in resp) { "Tracker domain must return 403 while blockTrackers=true: $resp" }
+                    }
+
+                    // Bug #25: Live settings update toggles tracker blocking, param stripping, persona, and Alt-Svc off
+                    proxy.updateSettings(
+                        blockTrackers = false,
+                        stripUrlParams = false,
+                        blockQuicAndLeaks = false,
+                        devicePersona = DevicePersona.OFF,
+                    )
+                    Socket(InetAddress.getLoopbackAddress(), pPort).use { s ->
+                        s.soTimeout = 3000
+                        s.outputStream.write("GET http://127.0.0.1:${httpSrv.localPort}/c?utm_source=keepme HTTP/1.1\r\nHost: 127.0.0.1:${httpSrv.localPort}\r\nUser-Agent: KeepOriginalUA\r\n\r\n".toByteArray())
+                        s.outputStream.flush()
+                        val resp = String(s.inputStream.readAllBytes(), Charsets.US_ASCII)
+                        expect("Alt-Svc: h3=" in resp) { "Alt-Svc must be preserved when blockQuicAndLeaks=false: $resp" }
+                    }
+                    expect("utm_source=keepme" in upstreamRequests.last() && "KeepOriginalUA" in upstreamRequests.last()) {
+                        "Live updateSettings must disable URL param stripping & UA spoofing: ${upstreamRequests.last()}"
+                    }
+
+                    // Tracker domain succeeds over loopback once live blockTrackers=false (resolved via fakeDoh -> 127.0.0.1)
+                    Socket(InetAddress.getLoopbackAddress(), pPort).use { s ->
+                        s.soTimeout = 3000
+                        s.outputStream.write("GET http://doubleclick.net:${httpSrv.localPort}/allowed HTTP/1.1\r\nHost: doubleclick.net:${httpSrv.localPort}\r\n\r\n".toByteArray())
+                        s.outputStream.flush()
+                        val resp = String(s.inputStream.readAllBytes(), Charsets.US_ASCII)
+                        expect("200 OK" in resp && "403 Forbidden" !in resp) { "Tracker domain must succeed via loopback once blockTrackers=false: $resp" }
+                    }
+                }
+                httpSrv.close()
+                httpThread.join(1000)
+            }
+            origin.close()
+            originThread.join(1000)
+        }
+    }
+
+    // ------------------------------------------------------------------ 45. Unhovered Swing anti-white hardening, ComboBox/CheckBox/4 workspaces, formatting & Sanitizer
+    test("45. Unhovered Swing controls, JComboBox, all 4 MainWindow workspaces, Sparkline/Shield visuals & WindowsSystemProxy sanitizer") {
+        // 1) WindowsSystemProxy loop/stale localhost sanitization
+        eq(WindowsSystemProxy.sanitizeCapturedProxy(1, "127.0.0.1:8880"), 0 to null, "Loopback proxy sanitized")
+        eq(WindowsSystemProxy.sanitizeCapturedProxy(1, "http=127.0.0.1:8880;https=127.0.0.1:8880"), 0 to null, "Scheme loopback sanitized")
+        eq(WindowsSystemProxy.sanitizeCapturedProxy(1, "localhost:9999"), 0 to null, "localhost proxy sanitized")
+        eq(WindowsSystemProxy.sanitizeCapturedProxy(1, "corp-proxy.local:8080"), 1 to "corp-proxy.local:8080", "External proxy preserved")
+        eq(WindowsSystemProxy.sanitizeCapturedProxy(0, "corp-proxy.local:8080"), 0 to null, "Disabled proxy stays off")
+
+        // 2) ThroughputSparklinePanel unit formatting (B/s .. GB/s and B .. GB)
+        val sp = ThroughputSparklinePanel()
+        expect("B/s" in sp.formatRate(0.25f) && "KB/s" !in sp.formatRate(0.25f)) { "Sub-KB/s must format as B/s" }
+        expect("KB/s" in sp.formatRate(42.5f)) { "KB/s range format check" }
+        expect("MB/s" in sp.formatRate(2048f)) { "MB/s range format check" }
+        expect("GB/s" in sp.formatRate(2_097_152f)) { "GB/s range format check" }
+        eq(sp.formatBytes(512L), "512 B", "formatBytes B")
+        expect("KB" in sp.formatBytes(2048L) && "MB" in sp.formatBytes(5L * 1024L * 1024L) && "GB" in sp.formatBytes(3L * 1024L * 1024L * 1024L)) {
+            "formatBytes scaling check"
+        }
+
+        // 3) ModernPowerShieldPanel isConnecting state offscreen paint + animator offscreen safety
+        val shield = ModernPowerShieldPanel().apply {
+            setSize(320, 180)
+            isConnecting = true
+        }
+        val shieldImg = java.awt.image.BufferedImage(320, 180, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        val sg = shieldImg.createGraphics()
+        shield.paint(sg)
+        sg.dispose()
+        shield.stop()
+        var amberPixels = 0
+        for (y in 0 until 180) {
+            for (x in 0 until 320) {
+                val c = java.awt.Color(shieldImg.getRGB(x, y), true)
+                if (c.red > 180 && c.green in 110..235 && c.blue < 120) amberPixels++
+            }
+        }
+        expect(amberPixels >= 25) { "isConnecting state must render visible amber aura/emblem pixels, got $amberPixels" }
+
+        // 4) Unhovered FreedomButton (text+icon & icon-only) & JComboBox offscreen pixel visibility (never white/hover-only)
+        FreedomDarkTheme.install()
+        expect(javax.swing.UIManager.get("Button.gradient") == null) { "Metal OceanTheme Button.gradient must be cleared" }
+
+        fun assertDarkWithBrightGlyphs(img: java.awt.image.BufferedImage, label: String) {
+            var darkPx = 0
+            var glyphPx = 0
+            var whiteBgPx = 0
+            for (y in 0 until img.height) {
+                for (x in 0 until img.width) {
+                    val c = java.awt.Color(img.getRGB(x, y), true)
+                    if (c.red < 55 && c.green < 65 && c.blue < 90) darkPx++
+                    if (c.red > 130 || c.green > 130 || c.blue > 130) glyphPx++
+                    if (c.red > 240 && c.green > 240 && c.blue > 240) whiteBgPx++
+                }
+            }
+            val total = img.width * img.height
+            expect(darkPx > total * 0.55) { "$label must keep dark background (>=55%), got $darkPx/$total" }
+            expect(glyphPx >= 18) { "$label must visibly paint foreground/icon pixels BEFORE hover, got $glyphPx" }
+            expect(whiteBgPx < total * 0.12) { "$label must never fill a bright white box, got $whiteBgPx/$total" }
+        }
+
+        val unhoveredBtn = FreedomButton("ÖZGÜR AĞ", iconDrawer = SwingVectorIcons::drawPower).apply { setSize(160, 36) }
+        val btnImg = java.awt.image.BufferedImage(160, 36, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        unhoveredBtn.createGraphicsSafePaint(btnImg)
+        assertDarkWithBrightGlyphs(btnImg, "Unhovered FreedomButton")
+
+        val arrowOnlyBtn = FreedomButton(
+            "",
+            fillColor = java.awt.Color(23, 34, 54),
+            textColor = java.awt.Color(148, 163, 184),
+            borderColor = java.awt.Color(38, 52, 74),
+            arc = 6,
+            iconDrawer = { g2, cx, cy, sz, col -> SwingVectorIcons.drawIcon(g2, FreedomIconId.CHEVRON_DOWN, cx, cy, sz, col, 2.0f) },
+        ).apply { setSize(28, 28) }
+        val arrImg = java.awt.image.BufferedImage(28, 28, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        arrowOnlyBtn.createGraphicsSafePaint(arrImg)
+        assertDarkWithBrightGlyphs(arrImg, "Unhovered Icon-only FreedomButton")
+
+        val combo = FreedomDarkTheme.styleCombo(javax.swing.JComboBox(arrayOf("Google Chrome", "Microsoft Edge"))).apply {
+            setSize(240, 32)
+            doLayout()
+        }
+        val comboImg = java.awt.image.BufferedImage(240, 32, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        combo.createGraphicsSafePaint(comboImg)
+        assertDarkWithBrightGlyphs(comboImg, "Unhovered styled JComboBox")
+
+        // 5) Paint all 4 MainWindow workspaces & confirm no white chrome & live telemetry card exists in Diagnostics tab
+        val win = MainWindow()
+        try {
+            val root = win.buildRootPanelForTest()
+            root.setSize(1080, 760)
+            root.doLayout()
+
+            val navBtns = ArrayList<FreedomButton>()
+            val textAreas = ArrayList<javax.swing.JTextArea>()
+            fun walk(c: java.awt.Component) {
+                if (c is FreedomButton) navBtns += c
+                if (c is javax.swing.JTextArea) textAreas += c
+                if (c is java.awt.Container) c.components.forEach(::walk)
+            }
+            walk(root)
+            val tabButtons = navBtns.filter {
+                it.text in setOf("Kontrol Merkezi", "Tarayıcı & Gizlilik", "Ağ Teşhis Lab", "Sistem & Günlük")
+            }
+            eq(tabButtons.size, 4, "MainWindow must expose all 4 sidebar workspace buttons")
+            expect(textAreas.any { "RIPE Atlas" in it.text }) {
+                "Diagnostics workspace must embed live RIPE Atlas / OONI / M-Lab telemetry area"
+            }
+
+            for ((idx, tabBtn) in tabButtons.withIndex()) {
+                tabBtn.doClick()
+                root.doLayout()
+                val wsImg = java.awt.image.BufferedImage(1080, 760, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+                root.createGraphicsSafePaint(wsImg)
+                // Bottom-right and center-top edges across every workspace must remain dark obsidian
+                val corner = java.awt.Color(wsImg.getRGB(1065, 745), true)
+                val navEdge = java.awt.Color(wsImg.getRGB(10, 360), true)
+                expect(corner.red < 45 && corner.green < 45 && corner.blue < 70) {
+                    "Workspace $idx (${tabBtn.text}) bottom-right leaked bright color: $corner"
+                }
+                expect(navEdge.red < 45 && navEdge.green < 45 && navEdge.blue < 70) {
+                    "Workspace $idx sidebar edge leaked bright color: $navEdge"
+                }
+            }
+        } finally {
+            win.shutdown()
+        }
+    }
+
+    // ------------------------------------------------------------------ 46. runCli --self-test end-to-end gate
+    test("46. runCli --self-test passes all native, icon, telemetry, sanitizer and proxy checks") {
+        eq(runCli(listOf("--self-test")), 0, "runCli --self-test must pass and exit 0")
+    }
+
     println()
     println("RESULT: $passed passed, ${failures.size} failed")
     if (failures.isNotEmpty()) {
@@ -1756,5 +2421,11 @@ fun main() {
         exitProcess(1)
     }
     exitProcess(0)
+}
+
+private fun java.awt.Component.createGraphicsSafePaint(img: java.awt.image.BufferedImage) {
+    val g2 = img.createGraphics()
+    this.paint(g2)
+    g2.dispose()
 }
 

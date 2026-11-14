@@ -1,11 +1,11 @@
-# Freedom Network — CI: tests, Android APK and Windows EXE (app-image) on every push to The_DPI_Beta.
+# Freedom Network — CI: tests, Android APK and Windows EXE (app-image) on every push to Freedom_Network_Beta.
 # Only first-party GitHub actions are used. Signing material comes from repository secrets
 # (optional); without them the debug APK is still installable for testing.
 name: Build
 
 on:
   push:
-    branches: [The_DPI_Beta, Freedom_Network_Beta]
+    branches: [Freedom_Network_Beta]
   pull_request:
   workflow_dispatch:
 
@@ -55,6 +55,22 @@ jobs:
           FREEDOM_KEY_PASSWORD: ${{ secrets.FREEDOM_KEY_PASSWORD || secrets.THEDPI_KEY_PASSWORD }}
         run: ./gradlew --no-daemon check :Android:assembleDebug :Android:assembleRelease
 
+      - name: Verify APK native 16 KB alignment and JNI exports
+        run: |
+          set -euo pipefail
+          REL_APK=$(find Android/build/outputs/apk/release -name "*.apk" | head -n 1)
+          DBG_APK=$(find Android/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          for APK in "$DBG_APK" "$REL_APK"; do
+            echo "Inspecting $APK..."
+            unzip -l "$APK" | grep -q "lib/arm64-v8a/libfreedom.so"
+            unzip -p "$APK" lib/arm64-v8a/libfreedom.so > "$RUNNER_TEMP/libfreedom.so"
+            if command -v readelf >/dev/null 2>&1; then
+              readelf -lW "$RUNNER_TEMP/libfreedom.so" | grep -E "LOAD.*0x4000"
+              readelf -Ws "$RUNNER_TEMP/libfreedom.so" | grep -q "Java_com_freedom_network_Native_apiVersion"
+            fi
+          done
+          echo "Native libfreedom.so 16KB ELF alignment & JNI symbols verified."
+
       - uses: actions/upload-artifact@v7
         with:
           name: FreedomNetwork-Android
@@ -81,20 +97,27 @@ jobs:
       - name: Test on real Windows and package
         run: ./gradlew --no-daemon "-Pfreedom.windowsOnly=true" :check :Windows:check :Windows:packageWindows
 
-      - name: Smoke-test FreedomNetwork.exe --cli on real Windows
+      - name: Smoke-test FreedomNetwork.exe --cli --help & --self-test on real Windows
         shell: pwsh
         run: |
           $exe = (Resolve-Path "Windows/build/package/image/FreedomNetwork/FreedomNetwork.exe").Path
           if (-not (Test-Path $exe)) { throw "Missing $exe" }
-          $outFile = Join-Path $env:RUNNER_TEMP "freedom-cli-out.txt"
-          $errFile = Join-Path $env:RUNNER_TEMP "freedom-cli-err.txt"
-          $proc = Start-Process -FilePath $exe -ArgumentList @("--cli", "--help") -Wait -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
-          $out = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { "" }
-          $err = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { "" }
-          if ($out) { Write-Host $out }
-          if ($err) { Write-Host $err }
-          if ($proc.ExitCode -ne 0) { throw "FreedomNetwork.exe --cli --help failed with $($proc.ExitCode)" }
-          if ($out -notmatch "Freedom Network CLI") { throw "FreedomNetwork.exe --cli --help did not print expected banner" }
+          foreach ($modeArg in @("--help", "--self-test")) {
+            $outFile = Join-Path $env:RUNNER_TEMP "freedom-cli-out.txt"
+            $errFile = Join-Path $env:RUNNER_TEMP "freedom-cli-err.txt"
+            $proc = Start-Process -FilePath $exe -ArgumentList @("--cli", $modeArg) -Wait -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+            $out = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { "" }
+            $err = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { "" }
+            if ($out) { Write-Host $out }
+            if ($err) { Write-Host $err }
+            if ($proc.ExitCode -ne 0) { throw "FreedomNetwork.exe --cli $modeArg failed with $($proc.ExitCode)" }
+            if ($modeArg -eq "--help" -and $out -notmatch "Freedom Network CLI") {
+              throw "FreedomNetwork.exe --cli --help did not print expected banner"
+            }
+            if ($modeArg -eq "--self-test" -and $out -notmatch "SELF-TEST PASSED") {
+              throw "FreedomNetwork.exe --cli --self-test did not report SELF-TEST PASSED"
+            }
+          }
 
       - name: Zip app image
         shell: pwsh
@@ -181,6 +204,7 @@ jobs:
             adb logcat -d | tail -n 80
             exit 1
           fi
+          adb shell dumpsys package com.freedom.network | grep -E "FreedomVpnService|MainActivity"
           echo "Android Emulator smoke test PASSED (PID=$PID)"
 
   publish:

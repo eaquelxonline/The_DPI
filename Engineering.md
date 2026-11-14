@@ -1,6 +1,6 @@
-# Freedom Network — Mühendislik Belgesi (0.0 → 2.0)
+# Freedom Network — Mühendislik Belgesi (0.0 → 2.5)
 
-Durum tarihi: **12 Kasım 2026** · Dal: `The_DPI_Beta` · Paket: **`com.freedom.network`** · Sürüm: **1.0.0 (2026–2027 Evrensel Özgür Ağ Mimari Sürümü)**
+Durum tarihi: **14 Kasım 2026** · Dal: `Freedom_Network_Beta` · Paket: **`com.freedom.network`** · Sürüm: **2.5.0 (2026–2027 Evrensel Özgür Ağ Mimari Sürümü)**
 
 Bu belge; araştırma sonuçlarını, uyumluluk matrisini, mimariyi, tehdit modelini, test ve benchmark
 raporlarını, bilinen sınırları ve yapılmayanları tek yerde toplar. "Doğrulandı" işareti, iddianın bu
@@ -25,7 +25,7 @@ gelir. "Doğrulanmadı" olarak işaretli maddeler gerçek donanımda kontrol edi
 12. Performans stratejisi ve benchmark sonuçları
 13. Bağımlılık denetimi
 14. Dosya yapısı ve bilinçli sapmalar
-15. Aşama raporları 0.0 → 1.0
+15. Aşama raporları 0.0 → 2.5
 16. Test ve yayın kabul kriterleri + test raporu
 17. Teknik riskler ve sabit teknoloji kısıtlarıyla yapılamayanlar
 18. Derleme ve test talimatları
@@ -33,6 +33,7 @@ gelir. "Doğrulanmadı" olarak işaretli maddeler gerçek donanımda kontrol edi
 20. Aktif DPI aşma (`desync`), SIMD Assembly ve cihaz içi `TunBridge`
 21. Hibrit ağ özgürlüğü mimarisi (`REALITY + X25519MLKEM768 + Kişisel Röle`)
 22. Freedom Network 2026–2027 evrensel kısıt kaldırma, gizlilik kalkanı ve arayüz yenilemesi
+23. Freedom Network v2.5 (14 Kasım 2026): Sıfır Sızıntı, Gömülü SVG Motoru, Swing Koyu Tema ve Canlı Telemetri
 
 ---
 
@@ -394,8 +395,8 @@ Reddedilen ve ertelenen optimizasyonlar:
 ```
 Freedom Network/
 ├── .github/
-│   ├── workflows/build.yml
-│   └── Scrpits/Drive_Backup.gs
+│   ├── workflows/{build.yml, drive-backup.yml}
+│   └── scripts/drive_backup.gs
 ├── Gradle/{gradle-wrapper.jar, gradle-wrapper.properties}
 ├── Android/
 │   ├── build.gradle.kts
@@ -416,14 +417,14 @@ Freedom Network/
 |---|---|
 | `src/main` → `Source/Main`, `kotlin/` → `Kotlin/` | Kullanıcının talebi; Gradle'da kaynak dizinleri açıkça tanımlandı |
 | `Gradle/` doğrudan sarıcı dosyalarını içerir | `gradle/wrapper/` yerine kök altında `Gradle/gradle-wrapper.jar` ve `Gradle/gradle-wrapper.properties` |
-| `.github/Scrpits/Drive_Backup.gs` | Kullanıcı tanımlı dizin/dosya adlandırması; Google Drive yedekleme betiği |
-| Ortak bölüm her iki `Core.kt` içinde | JNI/codec/model/TLS/DoH/`IpPackets`/`TunBridge`/metin bölümü iki dosyada `SHARED SECTION` ile bayt-birebir aynı tutulur |
+| `.github/scripts/drive_backup.gs` | Google Drive otomatik kaynak (`Proje_Yedek`) ve ikili sürüm (`Son_Surum`) yedekleme betiği |
+| Ortak bölüm her iki `Core.kt` içinde | JNI/codec/model/TLS/DoH/`IpPackets`/`TunBridge`/`FreedomIconPaths`/`GlobalCensorshipTelemetry`/metin bölümü iki dosyada `SHARED SECTION` ile bayt-birebir aynı tutulur |
 | `Windows/Source/Test/Kotlin/Tests.kt` | JUnit yerine bağımlılıksız özel test koşucusu |
 | `Native/Tests.rs` | Testleri üretim kodundan ayırır; `#[cfg(test)] #[path]` ile tek crate korunur |
 | `Native/Arm64.s` & `Native/x86_64.s` | Entegre assembler (`global_asm!`) ile ARM64 NEON ve x86_64 SSE2 SIMD hızlandırması |
 | Kökte Cargo.toml yok | Tek crate; workspace gerekmiyor |
 
-## 15. Aşama raporları 0.0 → 1.0
+## 15. Aşama raporları 0.0 → 2.5
 
 | Aşama | Teslimat | Kabul kanıtı | Durum |
 |---|---|---|---|
@@ -438,6 +439,7 @@ Freedom Network/
 | 0.8 Optimizasyon | Benchmark'lar, `IPTOS_LOWDELAY`, 64 KiB tampon, Happy Eyeballs DNS yarışı | Bölüm 12 & 22 | ✅ |
 | 0.9 Stres/Uyumluluk | Uzun süreli, eşzamanlı ve tekrarlı başlat/kapat testleri | Bölüm 12 ve 16 | ✅ |
 | 1.0 Yayın | Sürüm 1.0.0 (`com.freedom.network`) | Otomatik CI kapısı | ✅ |
+| 2.5 Kıdemli Mimari | Sıfır-Sızıntı (Hata #1–#29), 34-ikon gömülü SVG motoru, Catmull-Rom Sparkline, Swing koyu tema sertleştirmesi, canlı RIPE Atlas/OONI/M-Lab telemetrisi | 104/104 Rust + 46/46 JVM + `--self-test` + CI Emülatör/Windows EXE | ✅ |
 
 ## 16. Test ve yayın kabul kriterleri + test raporu
 
@@ -445,14 +447,17 @@ Freedom Network/
 
 | Paket | Sonuç |
 |---|---|
-| Rust birim ve entegrasyon testleri (`cargo test --release --locked`) | **93/93** ✅ (+4 benchmark/stres testi, `--ignored`) |
+| Rust birim ve entegrasyon testleri (`cargo test --release --locked`) | **104/104** ✅ (+4 benchmark/stres testi, `--ignored`) |
 | clippy `-D warnings` & `rustfmt --check` | 0 uyarı ✅ |
-| JVM/JNI (`-Xcheck:jni`, `Windows/Source/Test/Kotlin/Tests.kt`): wire codec, JNI, TLS, DoH, sistem geneli, stres, aktif desync (`REALITY + X25519MLKEM768 + xtls-rprx-vision`), `ServerManager`, `TunBridge` (Happy Eyeballs DoH3, Tracker NXDOMAIN, STUN leak guard, UDP NAT, TCP Desync, Roaming) | **25/25** ✅ |
-| Android lint (uyarılar hata sayılıyor) | 0 bulgu ✅ |
+| JVM/JNI (`-Xcheck:jni`, `Windows/Source/Test/Kotlin/Tests.kt`): wire codec, JNI, TLS, DoH, sistem geneli, stres, aktif desync (`REALITY + X25519MLKEM768 + xtls-rprx-vision`), `ServerManager`, `TunBridge`, `UserspaceTcpStack`, `WindowsNextGenProxy` (WARP ön-el-sıkışma bariyeri, `CUSTOM_RELAY` sıfır-DNS & fail-closed, canlı ayar güncelleme, `Alt-Svc: h3` temizliği), 34-ikon `FreedomIconPaths` / `SwingVectorIcons`, hover-öncesi koyu Swing kontrolleri ve 4 çalışma alanı piksel doğrulaması | **46/46** ✅ |
+| CLI uçtan uca kendi-kendini doğrulama (`FreedomNetwork --cli --self-test`) | **SELF-TEST PASSED** (`Native 1.0.0 · Icons=34 · Telemetry & Proxy OK`) ✅ |
+| Android lint & APK derlemesi (Debug + R8 Release, 16 KB ELF hizalaması, KVM `x86_64` emülatör duman testi) ve Windows `jpackage` (`FreedomNetwork.exe --cli --self-test`) | GitHub Actions CI kapısında (`Build` iş akışı) doğrulanır ✅ |
+
+> **Doğrulama ortamı notu:** Yerel Linux geliştirme ortamında Rust çekirdek testleri (`104/104`), `clippy`/`rustfmt`, paylaşılan `SHARED SECTION` bayt eşitliği, Windows JVM/JNI/Swing/Proxy test paketi (`46/46`, `-Xcheck:jni`) ve `--cli --self-test` doğrudan çalıştırılarak doğrulanmıştır. Android APK (`arm64-v8a` + KVM `x86_64` emülatör) ve yerel Windows `FreedomNetwork.exe` (`jpackage`) doğrulamaları GitHub Actions `Build` iş akışında otomatik koşar.
 
 **Yayın kabul kriterleri:**
 
-1. Otomatik GitHub Actions CI kapısı tamamen yeşil olmalı (`Build` + `Drive Yedekle`). ✅
+1. Otomatik GitHub Actions CI kapısı tamamen yeşil olmalı (`Build` + `Drive Yedekle`, `Freedom_Network_Beta` dalı). ✅
 2. Release APK imzası (`FREEDOM_KEYSTORE*` / `THEDPI_KEYSTORE*` ortam değişkenleri) ve Windows Authenticode imzası kullanıcı ortamında sağlanır.
 
 ### 17. Teknik riskler ve sabit kısıtlarla yapılamayanlar
@@ -588,4 +593,27 @@ Sıcak yolda (hot-path) paket başına gecikmeyi nanosaniye seviyesinde tutmak i
    * `ModernPowerShieldView` & `ModernPowerShieldPanel`: Önbellekli `RadialGradient`/`LinearGradient`/`SweepGradient` gölgelendiricileri, zıt yönlü hassas yörüngeler, 12 azimut kadran çizgisi ve yumuşatılmış hap durum göstergesi.
    * **Android 11–17 tam uyum:** `setDecorFitsSystemWindows(false)` + şeffaf sistem çubukları, koyu sistem ikon kontrastı, dış dolguyu koruyan `WindowInsets` dinleyicisi ve API 33–37 `OnBackInvokedCallback` öngörülü geri hareketi.
    * **Google Play `VpnService` uyumu:** `FreedomVpnService` için yerel cihaz içi çalışma beyanı ve belirgin kullanıcı onay penceresi (`AlertDialog`).
+
+---
+
+## 23. Freedom Network v2.5 (14 Kasım 2026): Sıfır Sızıntı, Gömülü SVG Motoru, Swing Koyu Tema ve Canlı Telemetri
+
+1. **Sıfır-Sızıntı (Zero-Leak) & Kriptografik Veri Düzlemi Sertleştirmesi (Hata #1–#29 Düzeltmeleri):**
+   * **WARP Ön-El-Sıkışma Bariyeri (`warpBootstrapping`):** `TunnelMode.AUTO_WARP` / `WindowsRouteMode.AUTO_WARP` başlatılırken WireGuard `Noise_IKpsk2` el sıkışması tamamlanana veya doğrulanmış yedeğe düşene kadar hiçbir TCP/UDP/DNS paketi ham ISS arayüzüne sızdırılmaz (`leaksBlocked`).
+   * **`CUSTOM_RELAY` Sıfır-DNS ve Fail-Closed Davranışı:** Özel `socks5://` veya `http://` röle modunda hedef alan adları yerel/sistem DNS'e sorulmadan doğrudan SOCKS5 (`ATYP = 0x03`) veya HTTP `CONNECT host:port` üzerinden röleye iletilir; röle erişilemezse doğrudan ISS soketine sessizce düşülmez (`IOException`). Arka plan DoH `Stale-While-Revalidate` yenilemeleri de aktif tünel/röle içinden geçirilir.
+   * **Kriptografik Rastgelelik ve Tekrar (Replay) Koruması:** DNS işlem kimlikleri (`TXID`) ve akış başına TCP başlangıç sıra numaraları (`ISN`) CSPRNG (`SecureRandom` / işletim sistemi entropisi) ile üretilir; WireGuard `tai64n_now()` atomik monoton nanosaniye durumu (`AtomicU64`) tutar; `TunBridge.onWarpInbound()` yalnızca aktif `tcpTable` / `udpTable` akışlarına ait paketleri TUN arayüzüne kabul eder.
+   * **IPv4/IPv6 + Post-Kuantum Desync Eşitliği ve Assembly Taşma Zinciri:** L2 Ethernet dolgu baytları IPv4 `Total Length` / IPv6 `Payload Length + 40` sınırına kırpılır; `desync_ipv6` hem TCP (`nh == 6`, `AdaptiveFull | RealityVision` modunda çift bağımsız decoy) hem UDP (`nh == 17`, QUIC v1/v2 `Initial` şaşırtma) destekler; `X25519MLKEM768` (`0x11ec`), `SecP256r1MLKEM768` (`0x11eb`) ve `SecP384r1MLKEM1024` (`0x11ed`) + ECH (`0xfe0d`) çoklu segment bölmeleri korunur; `Native/Arm64.s` ve `Native/x86_64.s` içindeki `freedom_csum_fold` tam 64→16 bit `adc` taşma katlaması uygular.
+   * **Yüksek Hızlı Geri-Basınçlı (Backpressure-Safe) TUN & Proxy Motoru:** `TunBridge.TcpFlow` içinde `outboundQueue.offer(payload)` kontrolü `clientNextSeq` ilerletilmeden önce yapılır; `FIN` sıra numarası 32-bit modüler aritmetikle (`(seq + payload.size) and 0xFFFFFFFFL == clientNextSeq`) doğrulanır; tablo dolduğunda en eski (`lastActiveNs`) akış tahliye edilir; UDP tamponları `65535` bayt olarak ayrılır; düz metin HTTP yanıtlarındaki `Alt-Svc: h3=...` başlıkları (`stripPlainHttpAltSvc`) temizlenerek `ERR_QUIC_PROTOCOL_ERROR` döngüsü önlenir; `updateSettings` ve `LocalProxy` port koruyarak canlı yapılandırma güncellemesi yapar.
+2. **Gömülü 34-İkon 24×24 SVG Vektör Motoru (`FreedomIconPaths` & `SvgPathParser`) ve Catmull-Rom Sparkline:**
+   * Harici çizim/font/emoji bağımlılığı olmadan `// SHARED SECTION` içindeki `FreedomIconId` (34 ikon) ve `SvgPathParser` (`M/m`, `L/l`, `H/h`, `V/v`, `C/c`, `S/s`, `Q/q`, `T/t`, `A/a`, `Z/z`) ile hem Android `Canvas` (`AndroidVectorIcons`) hem Windows `Graphics2D` (`SwingVectorIcons`, `KEY_STROKE_PURE` + ekran-uzayı minimum çizgi kalınlığı) üzerinde keskin vektör ikonlar çizilir.
+   * `ThroughputSparklineView` (Android) ve `ThroughputSparklinePanel` (Windows), Catmull-Rom kübik Bezier eğrileri (`cubicTo` / `curveTo`), çift RX/TX gradyan dolgusu ve `B/s`, `KB/s`, `MB/s`, `GB/s` dinamik birim ölçeklemesi sunar.
+   * `ModernPowerShieldView` ve `ModernPowerShieldPanel` animatörleri görünürlük ve pencere küçültme (`windowIconified`) durumuna duyarlıdır; sekme/pencere gizlendiğinde CPU tüketimini sıfırlar.
+3. **Windows 10/11 4-Çalışma Alanlı Obsidyen Komuta Merkezi ve Hover-Öncesi Beyaz Kutu Koruması:**
+   * `FreedomDarkTheme.install()`, Swing Metal `OceanTheme` varsayılanlarındaki 13 `*.gradient` anahtarını (`Button.gradient`, `ToggleButton.gradient`, `ComboBox.gradient`, `ScrollBar.gradient` vb.) hem `UIManager.getDefaults()` hem de `UIManager.getLookAndFeelDefaults()` tablosundan temizler.
+   * `FreedomButton` (`BasicButtonUI` + `paintBorder` no-op + hover-öncesi yüksek kontrastlı metin/SVG ikon çizimi), `FreedomDarkTheme.styleCombo` (`BasicComboBoxUI` + koyu `BasicComboPopup` + `DarkScrollBarUI` + 20 px SVG ok düğmesi) ve `DarkCheckBoxIcon` sayesinde fare üzerine gelmeden önce de hiçbir kontrol beyaz/gri kutu çizmez.
+   * `WindowsSystemProxy.sanitizeCapturedProxy`, önceki oturumlardan kalmış `127.0.0.1` / `localhost` vekil kayıtlarını temizleyerek vekil döngüsünü önler; `WindowsBrowserLauncher` ise Chrome/Edge/Brave için `--disable-quic` ve WebRTC kilitli izole profil başlatır.
+4. **Küresel Gönüllü Sansür Telemetrisi (`GlobalCensorshipTelemetry`) ve Uçtan Uca CI Doğrulaması:**
+   * **RIPE Atlas API v2**, **OONI API v1**, **M-Lab Locate v2** ve **Cloudflare `/cdn-cgi/trace`** uç noktaları sorgulanarak yerel teşhis bulguları ulusal gönüllü prob verileriyle çapraz doğrulanır (`Text.telemetryReport`).
+   * `.github/workflows/build.yml`, her `Freedom_Network_Beta` itmesinde (push) Windows x64 üzerinde `FreedomNetwork.exe --cli --self-test` ve Ubuntu KVM üzerinde donanım hızlandırmalı Android emülatör (`MainActivity` + `FreedomVpnService` + 16 KB `libfreedom.so`) doğrulamasını koşar; ardından `.github/workflows/drive-backup.yml` ve `.github/scripts/drive_backup.gs` aracılığıyla Google Drive `Proje_Yedek` ve `Son_Surum` klasörlerini günceller.
+
 

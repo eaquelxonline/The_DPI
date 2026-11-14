@@ -3991,3 +3991,233 @@ fn classify_systemic_quic_timeouts_reaches_instant_recommend() {
     assert_eq!(dec.state, decide::State::Recommend);
     assert_eq!(dec.action, decide::Action::PreferTcpFallback);
 }
+
+#[test]
+fn csum_fold_carry_overflow_vectors_match_std() {
+    let empty: &[u8] = &[];
+    let all_ff = [0xffu8; 64];
+    for init in [
+        0x0001_0000_FFFF_FFFFu64,
+        0xFFFF_FFFF_FFFF_FFFFu64,
+        0xFFFF_FFFE_0001_FFFFu64,
+        0x0000_0000_0001_FFFFu64,
+        0xFFFF_FFFF_0000_FFFFu64,
+    ] {
+        assert_eq!(
+            ascii::csum_fold(empty, init),
+            ascii::csum_fold_std(empty, init),
+            "empty fold mismatch for init={init:#x}"
+        );
+        assert_eq!(
+            ascii::csum_fold(&all_ff, init),
+            ascii::csum_fold_std(&all_ff, init),
+            "all_ff fold mismatch for init={init:#x}"
+        );
+    }
+    let tricky = [0xffu8, 0xffu8, 0x00u8, 0x00u8];
+    assert_eq!(
+        ascii::csum_fold(&tricky, 0x0001_0000_FFFF_0000u64),
+        0x0001u16
+    );
+}
+
+#[test]
+fn desync_clamps_ethernet_padding_and_supports_ipv6_udp_and_dual_decoys() {
+    let ch = sample_tls_client_hello("padded.example.org", true, true);
+    let src4 = Ipv4Addr::new(192, 0, 2, 10);
+    let dst4 = Ipv4Addr::new(198, 51, 100, 20);
+    let mut padded_v4 = wrap_ipv4_tcp(src4, dst4, 54321, 443, 1000, 0x18, &ch);
+    padded_v4.extend_from_slice(&[0xaa; 18]); // L2 trailing padding beyond IPv4 Total Length
+
+    let cfg = desync::DesyncConfig {
+        mode: desync::DesyncMode::AdaptiveFull,
+        fake_ttl: 4,
+        split_pos: 2,
+        drop_spoofed_rst: true,
+        ..desync::DesyncConfig::default()
+    };
+    let out4 = desync::desync_packet(&padded_v4, &cfg);
+    assert_eq!(out4.packets.len(), 5);
+    for seg in &out4.packets[2..] {
+        assert_eq!(
+            desync::transport_checksum_v4(src4, dst4, 6, &seg[20..]),
+            0,
+            "IPv4 padding must be stripped before TCP checksum & segmentation"
+        );
+    }
+
+    // Inbound spoofed RST with L2 padding must still be dropped
+    let mut padded_rst = wrap_ipv4_tcp(dst4, src4, 443, 54321, 500, 0x04, b"reset");
+    padded_rst.extend_from_slice(&[0x55; 12]);
+    assert!(desync::should_drop_inbound(&padded_rst));
+
+    // IPv6 TCP with trailing padding + dual independent decoys in AdaptiveFull/RealityVision
+    let src6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let dst6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+    let tcp_len = 20 + ch.len();
+    let mut pkt6 = vec![0u8; 40 + tcp_len + 10];
+    pkt6[0] = 0x60;
+    pkt6[4..6].copy_from_slice(&(tcp_len as u16).to_be_bytes());
+    pkt6[6] = 6; // TCP
+    pkt6[7] = 64;
+    pkt6[8..24].copy_from_slice(&src6.octets());
+    pkt6[24..40].copy_from_slice(&dst6.octets());
+    pkt6[40..42].copy_from_slice(&50000u16.to_be_bytes());
+    pkt6[42..44].copy_from_slice(&443u16.to_be_bytes());
+    pkt6[44..48].copy_from_slice(&2000u32.to_be_bytes());
+    pkt6[52] = 0x50;
+    pkt6[53] = 0x18;
+    pkt6[60..60 + ch.len()].copy_from_slice(&ch);
+    let c6 = desync::transport_checksum_v6(src6, dst6, 6, &pkt6[40..40 + tcp_len]);
+    pkt6[56..58].copy_from_slice(&c6.to_be_bytes());
+
+    let out6 = desync::desync_packet(&pkt6, &cfg);
+    assert_eq!(
+        out6.packets.len(),
+        5,
+        "IPv6 AdaptiveFull must emit 2 decoys + 3 segments"
+    );
+    assert_eq!(out6.packets[0][7], 4); // Hop limit decoy has valid checksum
+    assert_eq!(
+        desync::transport_checksum_v6(src6, dst6, 6, &out6.packets[0][40..]),
+        0
+    );
+    assert_eq!(out6.packets[1][7], 64); // BadSum decoy has normal Hop limit & bad checksum
+    assert_ne!(
+        desync::transport_checksum_v6(src6, dst6, 6, &out6.packets[1][40..]),
+        0
+    );
+
+    // IPv6 UDP/QUIC v2 Initial scramble
+    let mut q2 = quic::build_probe(
+        &[1, 2, 3, 4, 5, 6, 7, 8],
+        &[9, 10, 11, 12, 13, 14, 15, 16],
+        quic::MIN_INITIAL_DATAGRAM,
+    );
+    q2[1..5].copy_from_slice(&quic::VERSION_2.to_be_bytes());
+    let udp_len = 8 + q2.len();
+    let mut upkt6 = vec![0u8; 40 + udp_len + 6];
+    upkt6[0] = 0x60;
+    upkt6[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    upkt6[6] = 17; // UDP
+    upkt6[7] = 64;
+    upkt6[8..24].copy_from_slice(&src6.octets());
+    upkt6[24..40].copy_from_slice(&dst6.octets());
+    upkt6[40..42].copy_from_slice(&55555u16.to_be_bytes());
+    upkt6[42..44].copy_from_slice(&443u16.to_be_bytes());
+    upkt6[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    upkt6[48..48 + q2.len()].copy_from_slice(&q2);
+    let uc6 = desync::transport_checksum_v6(src6, dst6, 17, &upkt6[40..40 + udp_len]);
+    upkt6[46..48].copy_from_slice(&uc6.to_be_bytes());
+
+    let uout6 = desync::desync_packet(
+        &upkt6,
+        &desync::DesyncConfig {
+            mode: desync::DesyncMode::QuicScramble,
+            fake_ttl: 3,
+            ..desync::DesyncConfig::default()
+        },
+    );
+    assert_eq!(uout6.inspection.protocol, desync::PROTO_QUIC_INITIAL);
+    assert_eq!(uout6.packets.len(), 2);
+    assert_eq!(uout6.packets[0][7], 3);
+    assert_eq!(uout6.packets[1].len(), 40 + udp_len);
+}
+
+#[test]
+fn desync_detects_all_pq_keyshare_groups_and_ech_split() {
+    for group in [
+        desync::TLS_GROUP_SECP256R1_MLKEM768,
+        desync::TLS_GROUP_SECP384R1_MLKEM1024,
+        desync::TLS_GROUP_X25519_KYBER768_DRAFT00,
+    ] {
+        let mut ch = sample_tls_client_hello("pq.example.org", true, true);
+        let idx = ascii::scan_pattern(&ch, &[0x11, 0xec]).unwrap();
+        ch[idx..idx + 2].copy_from_slice(&group.to_be_bytes());
+        let info = desync::inspect_l7(&ch, 2);
+        assert!(info.post_quantum, "group {group:#x} must be flagged PQ");
+        assert!(info.ech_offset.is_some());
+        assert_eq!(info.split_offsets.len(), 2);
+    }
+}
+
+#[test]
+fn local_proxy_live_config_update_and_alt_svc_stripping() {
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let up_port = upstream.local_addr().unwrap().port();
+    let srv_thread = thread::spawn(move || {
+        let (mut conn, _) = upstream.accept().unwrap();
+        let mut buf = [0u8; 512];
+        let _ = conn.read(&mut buf);
+        conn.write_all(
+            b"HTTP/1.1 200 OK\r\nAlt-Svc: h3=\":443\"; ma=86400\r\nContent-Length: 2\r\n\r\nOK",
+        )
+        .unwrap();
+        let _ = conn.flush();
+    });
+
+    let _g = registry_guard();
+    let eng = engine::Engine::new(engine::Config::default());
+    let mut cfg_rec = Record::new();
+    cfg_rec
+        .int(tags::desync::MODE, desync::DesyncMode::Split as i64)
+        .text(tags::desync::PERSONA, "iphone19")
+        .int(tags::desync::BLOCK_TRACKERS, 1)
+        .int(tags::desync::STRIP_PARAMS, 1);
+    let r1 = eng.start_proxy(&cfg_rec);
+    let pport = r1.get_int(tags::desync::PORT).unwrap() as u16;
+    assert!(pport > 0);
+
+    // Same explicit port updates config live without rebinding
+    let mut upd_rec = Record::new();
+    upd_rec
+        .int(tags::desync::PORT, i64::from(pport))
+        .int(tags::desync::MODE, desync::DesyncMode::RealityVision as i64)
+        .text(tags::desync::PERSONA, "pixel14")
+        .int(tags::desync::BLOCK_TRACKERS, 0)
+        .int(tags::desync::STRIP_PARAMS, 1);
+    let r2 = eng.start_proxy(&upd_rec);
+    assert_eq!(r2.get_int(tags::desync::PORT), Some(i64::from(pport)));
+    assert_eq!(
+        r2.get_int(tags::desync::MODE),
+        Some(desync::DesyncMode::RealityVision as i64)
+    );
+
+    // Plaintext HTTP response must have Alt-Svc stripped
+    let mut c = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, pport)).unwrap();
+    c.set_read_timeout(Some(Duration::from_millis(2500)))
+        .unwrap();
+    let req = format!("GET /check HTTP/1.1\r\nHost: 127.0.0.1:{up_port}\r\n\r\n");
+    c.write_all(req.as_bytes()).unwrap();
+    let mut resp = [0u8; 512];
+    let n = c.read(&mut resp).unwrap();
+    let resp_str = std::str::from_utf8(&resp[..n]).unwrap();
+    assert!(resp_str.contains("200 OK"));
+    assert!(
+        !resp_str.to_ascii_lowercase().contains("alt-svc"),
+        "Alt-Svc must be stripped on plaintext HTTP response: {resp_str}"
+    );
+    srv_thread.join().unwrap();
+    if let Ok(upstream6) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) {
+        let port6 = upstream6.local_addr().unwrap().port();
+        let t6 = thread::spawn(move || {
+            if let Ok((mut conn, _)) = upstream6.accept() {
+                let mut b = [0u8; 256];
+                let _ = conn.read(&mut b);
+                let _ = conn.write_all(b"HTTP/1.1 204 No Content\r\nAlt-Svc: h3=\":443\"\r\n\r\n");
+            }
+        });
+        let mut c6 = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, pport)).unwrap();
+        c6.set_read_timeout(Some(Duration::from_millis(2500)))
+            .unwrap();
+        let req6 = format!("GET /v6 HTTP/1.1\r\nHost: [::1]:{port6}\r\n\r\n");
+        c6.write_all(req6.as_bytes()).unwrap();
+        let mut resp6 = [0u8; 256];
+        let n6 = c6.read(&mut resp6).unwrap();
+        let s6 = std::str::from_utf8(&resp6[..n6]).unwrap();
+        assert!(s6.contains("204 No Content"));
+        assert!(!s6.to_ascii_lowercase().contains("alt-svc"));
+        let _ = t6.join();
+    }
+    eng.stop_proxy();
+}

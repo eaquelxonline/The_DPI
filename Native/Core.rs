@@ -2189,8 +2189,8 @@ pub mod desync {
     use std::net::{
         IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
     };
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, RwLock};
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
@@ -2209,6 +2209,12 @@ pub mod desync {
 
     /// IANA TLS 1.3 Hybrid Post-Quantum NamedGroup `X25519MLKEM768` (`0x11ec`).
     pub const TLS_GROUP_X25519_MLKEM768: u16 = 0x11ec;
+    /// IANA TLS 1.3 Hybrid Post-Quantum NamedGroup `SecP256r1MLKEM768` (`0x11eb`).
+    pub const TLS_GROUP_SECP256R1_MLKEM768: u16 = 0x11eb;
+    /// IANA TLS 1.3 Hybrid Post-Quantum NamedGroup `SecP384r1MLKEM1024` (`0x11ed`).
+    pub const TLS_GROUP_SECP384R1_MLKEM1024: u16 = 0x11ed;
+    /// Chrome/Cloudflare Draft Hybrid Post-Quantum NamedGroup `X25519Kyber768Draft00` (`0x6399`).
+    pub const TLS_GROUP_X25519_KYBER768_DRAFT00: u16 = 0x6399;
     /// Pure `MLKEM768` NamedGroup (`0x0200`).
     pub const TLS_GROUP_MLKEM768: u16 = 0x0200;
     /// Default legitimate cover `dest` domain used by `REALITY` camouflage.
@@ -2698,10 +2704,14 @@ pub mod desync {
                         out.ech_offset = Some(pos);
                         out.ech_len = ext_len;
                     }
-                    // key_share (0x0033) or supported_groups (0x000a) — X25519MLKEM768 (0x11ec) / MLKEM768 (0x0200)
+                    // key_share (0x0033) or supported_groups (0x000a) — X25519MLKEM768 (0x11ec),
+                    // SecP256r1MLKEM768 (0x11eb), SecP384r1MLKEM1024 (0x11ed), Kyber768 (0x6399), MLKEM768 (0x0200)
                     0x0033 | 0x000a
                         if ext_len > 512
                             || ascii::scan_pattern(ext_data, &[0x11, 0xec]).is_some()
+                            || ascii::scan_pattern(ext_data, &[0x11, 0xeb]).is_some()
+                            || ascii::scan_pattern(ext_data, &[0x11, 0xed]).is_some()
+                            || ascii::scan_pattern(ext_data, &[0x63, 0x99]).is_some()
                             || ascii::scan_pattern(ext_data, &[0x02, 0x00]).is_some() =>
                     {
                         out.post_quantum = true;
@@ -2723,6 +2733,13 @@ pub mod desync {
                 splits.push(mid_sni);
             } else if mid_sni < buf.len() {
                 splits.push(mid_sni);
+                if let Some(ech_off) = out.ech_offset {
+                    let mid_ech =
+                        (ech_off + (out.ech_len / 2).max(1)).min(buf.len().saturating_sub(1));
+                    if mid_ech > mid_sni {
+                        splits.push(mid_ech);
+                    }
+                }
             }
         } else if let Some(ech_off) = out.ech_offset {
             let mid_ech = (ech_off + (out.ech_len / 2).max(1)).min(buf.len().saturating_sub(1));
@@ -2735,6 +2752,12 @@ pub mod desync {
         }
         if splits.is_empty() && buf.len() > 2 {
             splits.push(first_split);
+            if out.post_quantum && buf.len() > 1400 {
+                let mid = (buf.len() / 2).max(first_split + 1);
+                if mid < buf.len() {
+                    splits.push(mid);
+                }
+            }
         }
         out.split_offsets = splits;
         Some(out)
@@ -2887,20 +2910,26 @@ pub mod desync {
             return false;
         }
         let version = pkt[0] >> 4;
-        let (ip_hdr_len, proto, ip_id, ttl) = match version {
+        let (pkt, ip_hdr_len, proto, ip_id, ttl) = match version {
             4 => {
                 let ihl = usize::from(pkt[0] & 0x0f) * 4;
-                if ihl < 20 || pkt.len() < ihl + 20 {
+                let total_len = usize::from(u16::from_be_bytes([pkt[2], pkt[3]]));
+                if ihl < 20 || total_len < ihl + 20 || pkt.len() < total_len {
                     return false;
                 }
                 let id = u16::from_be_bytes([pkt[4], pkt[5]]);
-                (ihl, pkt[9], id, pkt[8])
+                (&pkt[..total_len], ihl, pkt[9], id, pkt[8])
             }
             6 => {
                 if pkt.len() < 60 {
                     return false;
                 }
-                (40usize, pkt[6], 0u16, pkt[7])
+                let payload_len = usize::from(u16::from_be_bytes([pkt[4], pkt[5]]));
+                let total_len = 40 + payload_len;
+                if payload_len < 20 || pkt.len() < total_len {
+                    return false;
+                }
+                (&pkt[..total_len], 40usize, pkt[6], 0u16, pkt[7])
             }
             _ => return false,
         };
@@ -3092,14 +3121,23 @@ pub mod desync {
     }
 
     fn desync_ipv4(pkt: &[u8], cfg: &DesyncConfig) -> DesyncOutput {
-        let ihl = usize::from(pkt[0] & 0x0f) * 4;
-        if ihl < 20 || pkt.len() < ihl + 8 {
+        if pkt.len() < 28 {
             return DesyncOutput {
                 packets: vec![pkt.to_vec()],
                 dropped_inbound: false,
                 inspection: L7Inspection::default(),
             };
         }
+        let ihl = usize::from(pkt[0] & 0x0f) * 4;
+        let ip_total = usize::from(u16::from_be_bytes([pkt[2], pkt[3]]));
+        if ihl < 20 || ip_total < ihl + 8 || pkt.len() < ip_total {
+            return DesyncOutput {
+                packets: vec![pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: L7Inspection::default(),
+            };
+        }
+        let pkt = &pkt[..ip_total];
         let proto = pkt[9];
         if proto == 17 {
             return desync_ipv4_udp(pkt, ihl, cfg);
@@ -3207,34 +3245,8 @@ pub mod desync {
         }
     }
 
-    fn desync_ipv4_udp(pkt: &[u8], ihl: usize, cfg: &DesyncConfig) -> DesyncOutput {
-        let udp = &pkt[ihl..];
-        if udp.len() <= 8 {
-            return DesyncOutput {
-                packets: vec![pkt.to_vec()],
-                dropped_inbound: false,
-                inspection: L7Inspection::default(),
-            };
-        }
-        let payload = &udp[8..];
-        let info = inspect_l7(payload, cfg.split_pos);
-        if !matches!(
-            info.protocol,
-            PROTO_QUIC_INITIAL | PROTO_UDP_STUN_MEDIA | PROTO_UDP_REALTIME
-        ) || !matches!(
-            cfg.mode,
-            DesyncMode::QuicScramble | DesyncMode::AdaptiveFull | DesyncMode::RealityVision
-        ) {
-            return DesyncOutput {
-                packets: vec![pkt.to_vec()],
-                dropped_inbound: false,
-                inspection: info,
-            };
-        }
-        // Prepend a low-TTL decoy UDP datagram before the real QUIC Initial, STUN/VoIP media
-        // discovery, or real-time UDP connection request so stateful first-packet DPI filters
-        // latch onto the benign decoy while it expires before reaching the destination server.
-        let fake_payload = if info.protocol == PROTO_QUIC_INITIAL {
+    fn build_udp_decoy_payload(protocol: i64) -> Vec<u8> {
+        if protocol == PROTO_QUIC_INITIAL {
             quic::build_probe(
                 &[0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe],
                 &[0xca, 0xfe, 0xba, 0xbe, 0xde, 0xad, 0xbe, 0xef],
@@ -3246,11 +3258,51 @@ pub mod desync {
                 0x00, 0x11, 0x00, 0x04, 0x21, 0x12, 0xa4, 0x42, 0x66, 0x72, 0x64, 0x6d, 0x32, 0x30,
                 0x32, 0x36, 0x80, 0x28, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
             ]
-        };
+        }
+    }
+
+    fn desync_ipv4_udp(pkt: &[u8], ihl: usize, cfg: &DesyncConfig) -> DesyncOutput {
+        let udp = &pkt[ihl..];
+        if udp.len() <= 8 {
+            return DesyncOutput {
+                packets: vec![pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: L7Inspection::default(),
+            };
+        }
+        let udp_hdr_len = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
+        if udp_hdr_len <= 8 || udp.len() < udp_hdr_len {
+            return DesyncOutput {
+                packets: vec![pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: L7Inspection::default(),
+            };
+        }
+        let udp = &udp[..udp_hdr_len];
+        let real_pkt = &pkt[..ihl + udp_hdr_len];
+        let payload = &udp[8..];
+        let info = inspect_l7(payload, cfg.split_pos);
+        if !matches!(
+            info.protocol,
+            PROTO_QUIC_INITIAL | PROTO_UDP_STUN_MEDIA | PROTO_UDP_REALTIME
+        ) || !matches!(
+            cfg.mode,
+            DesyncMode::QuicScramble | DesyncMode::AdaptiveFull | DesyncMode::RealityVision
+        ) {
+            return DesyncOutput {
+                packets: vec![real_pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: info,
+            };
+        }
+        // Prepend a low-TTL decoy UDP datagram before the real QUIC Initial, STUN/VoIP media
+        // discovery, or real-time UDP connection request so stateful first-packet DPI filters
+        // latch onto the benign decoy while it expires before reaching the destination server.
+        let fake_payload = build_udp_decoy_payload(info.protocol);
         let udp_len = 8 + fake_payload.len();
         let total_len = ihl + udp_len;
         let mut fake_pkt = Vec::with_capacity(total_len);
-        fake_pkt.extend_from_slice(&pkt[..ihl]);
+        fake_pkt.extend_from_slice(&real_pkt[..ihl]);
         fake_pkt.extend_from_slice(&udp[..8]);
         fake_pkt.extend_from_slice(&fake_payload);
         fake_pkt[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
@@ -3268,7 +3320,71 @@ pub mod desync {
         fake_pkt[ihl + 6..ihl + 8].copy_from_slice(&udp_csum.to_be_bytes());
 
         DesyncOutput {
-            packets: vec![fake_pkt, pkt.to_vec()],
+            packets: vec![fake_pkt, real_pkt.to_vec()],
+            dropped_inbound: false,
+            inspection: info,
+        }
+    }
+
+    fn desync_ipv6_udp(pkt: &[u8], cfg: &DesyncConfig) -> DesyncOutput {
+        let udp = &pkt[40..];
+        if udp.len() <= 8 {
+            return DesyncOutput {
+                packets: vec![pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: L7Inspection::default(),
+            };
+        }
+        let udp_hdr_len = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
+        if udp_hdr_len <= 8 || udp.len() < udp_hdr_len {
+            return DesyncOutput {
+                packets: vec![pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: L7Inspection::default(),
+            };
+        }
+        let udp = &udp[..udp_hdr_len];
+        let real_pkt = &pkt[..40 + udp_hdr_len];
+        let payload = &udp[8..];
+        let info = inspect_l7(payload, cfg.split_pos);
+        if !matches!(
+            info.protocol,
+            PROTO_QUIC_INITIAL | PROTO_UDP_STUN_MEDIA | PROTO_UDP_REALTIME
+        ) || !matches!(
+            cfg.mode,
+            DesyncMode::QuicScramble | DesyncMode::AdaptiveFull | DesyncMode::RealityVision
+        ) {
+            return DesyncOutput {
+                packets: vec![real_pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: info,
+            };
+        }
+        let fake_payload = build_udp_decoy_payload(info.protocol);
+        let udp_len = 8 + fake_payload.len();
+        let mut fake_pkt = Vec::with_capacity(40 + udp_len);
+        fake_pkt.extend_from_slice(&real_pkt[..40]);
+        fake_pkt.extend_from_slice(&udp[..8]);
+        fake_pkt.extend_from_slice(&fake_payload);
+        fake_pkt[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        fake_pkt[7] = cfg.fake_ttl; // Hop Limit
+        fake_pkt[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        fake_pkt[46] = 0;
+        fake_pkt[47] = 0;
+        let mut src_b = [0u8; 16];
+        let mut dst_b = [0u8; 16];
+        src_b.copy_from_slice(&fake_pkt[8..24]);
+        dst_b.copy_from_slice(&fake_pkt[24..40]);
+        let udp_csum = transport_checksum_v6(
+            Ipv6Addr::from(src_b),
+            Ipv6Addr::from(dst_b),
+            17,
+            &fake_pkt[40..],
+        );
+        fake_pkt[46..48].copy_from_slice(&udp_csum.to_be_bytes());
+
+        DesyncOutput {
+            packets: vec![fake_pkt, real_pkt.to_vec()],
             dropped_inbound: false,
             inspection: info,
         }
@@ -3313,7 +3429,28 @@ pub mod desync {
     }
 
     fn desync_ipv6(pkt: &[u8], cfg: &DesyncConfig) -> DesyncOutput {
-        if pkt.len() < 60 || pkt[6] != 6 {
+        if pkt.len() < 48 {
+            return DesyncOutput {
+                packets: vec![pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: L7Inspection::default(),
+            };
+        }
+        let payload_len = usize::from(u16::from_be_bytes([pkt[4], pkt[5]]));
+        let total_len = 40 + payload_len;
+        if payload_len < 8 || pkt.len() < total_len {
+            return DesyncOutput {
+                packets: vec![pkt.to_vec()],
+                dropped_inbound: false,
+                inspection: L7Inspection::default(),
+            };
+        }
+        let pkt = &pkt[..total_len];
+        let next_hdr = pkt[6];
+        if next_hdr == 17 {
+            return desync_ipv6_udp(pkt, cfg);
+        }
+        if next_hdr != 6 || pkt.len() < 60 {
             return DesyncOutput {
                 packets: vec![pkt.to_vec()],
                 dropped_inbound: false,
@@ -3343,27 +3480,40 @@ pub mod desync {
         let base_seq = u32::from_be_bytes([tcp_hdr[4], tcp_hdr[5], tcp_hdr[6], tcp_hdr[7]]);
         let ranges = slice_ranges(payload.len(), &info.split_offsets);
 
-        let mut out_pkts = Vec::with_capacity(ranges.len() + 1);
+        let mut out_pkts = Vec::with_capacity(ranges.len() + 2);
         let decoy = make_decoy_payload_for_mode(payload, &info, cfg.mode);
-        if matches!(
-            cfg.mode,
-            DesyncMode::FakeBadSum
-                | DesyncMode::FakeAutoTtl
-                | DesyncMode::AdaptiveFull
-                | DesyncMode::RealityVision
-        ) {
-            let hop = matches!(
-                cfg.mode,
-                DesyncMode::FakeAutoTtl | DesyncMode::AdaptiveFull | DesyncMode::RealityVision
-            )
-            .then_some(cfg.fake_ttl);
-            let bad = matches!(
-                cfg.mode,
-                DesyncMode::FakeBadSum | DesyncMode::AdaptiveFull | DesyncMode::RealityVision
-            );
-            out_pkts.push(build_ipv6_tcp_segment(
-                ip_hdr, tcp_hdr, base_seq, false, hop, bad, &decoy,
-            ));
+        match cfg.mode {
+            DesyncMode::FakeBadSum => {
+                out_pkts.push(build_ipv6_tcp_segment(
+                    ip_hdr, tcp_hdr, base_seq, false, None, true, &decoy,
+                ));
+            }
+            DesyncMode::FakeAutoTtl => {
+                out_pkts.push(build_ipv6_tcp_segment(
+                    ip_hdr,
+                    tcp_hdr,
+                    base_seq,
+                    false,
+                    Some(cfg.fake_ttl),
+                    false,
+                    &decoy,
+                ));
+            }
+            DesyncMode::AdaptiveFull | DesyncMode::RealityVision => {
+                out_pkts.push(build_ipv6_tcp_segment(
+                    ip_hdr,
+                    tcp_hdr,
+                    base_seq,
+                    false,
+                    Some(cfg.fake_ttl),
+                    false,
+                    &decoy,
+                ));
+                out_pkts.push(build_ipv6_tcp_segment(
+                    ip_hdr, tcp_hdr, base_seq, false, None, true, &decoy,
+                ));
+            }
+            _ => {}
         }
         let mut real_segs: Vec<Vec<u8>> = ranges
             .iter()
@@ -3509,7 +3659,7 @@ pub mod desync {
     #[derive(Debug)]
     pub struct LocalProxy {
         port: u16,
-        config: DesyncConfig,
+        config: Arc<RwLock<DesyncConfig>>,
         stop: Arc<AtomicBool>,
         counters: Arc<ProxyCounters>,
         accept_thread: Option<JoinHandle<()>>,
@@ -3531,7 +3681,8 @@ pub mod desync {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_c = Arc::clone(&stop);
             let counters_c = Arc::clone(&counters);
-            let cfg_c = cfg.clone();
+            let config = Arc::new(RwLock::new(cfg));
+            let cfg_c = Arc::clone(&config);
 
             let handle = thread::Builder::new()
                 .name("freedom-desync-proxy".to_owned())
@@ -3541,7 +3692,8 @@ pub mod desync {
                             Ok((client, _)) => {
                                 let _ = client.set_nonblocking(false);
                                 counters_c.connections.fetch_add(1, Ordering::Relaxed);
-                                let cfg_conn = cfg_c.clone();
+                                let cfg_conn =
+                                    cfg_c.read().unwrap_or_else(|e| e.into_inner()).clone();
                                 let cnt_conn = Arc::clone(&counters_c);
                                 let _ = thread::Builder::new().stack_size(256 * 1024).spawn(
                                     move || {
@@ -3559,7 +3711,7 @@ pub mod desync {
 
             Ok(Self {
                 port,
-                config: cfg,
+                config,
                 stop,
                 counters,
                 accept_thread: Some(handle),
@@ -3570,8 +3722,16 @@ pub mod desync {
             self.port
         }
 
-        pub fn config(&self) -> &DesyncConfig {
-            &self.config
+        pub fn config(&self) -> DesyncConfig {
+            self.config
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+
+        pub fn update_config(&self, cfg: DesyncConfig) {
+            let mut g = self.config.write().unwrap_or_else(|e| e.into_inner());
+            *g = cfg;
         }
 
         pub fn counters(&self) -> &ProxyCounters {
@@ -3743,9 +3903,21 @@ pub mod desync {
                 })
                 .filter(|h| !h.is_empty())
                 .map_or_else(
-                    || format!("{}:80", info.host),
+                    || {
+                        if info.host.contains(':') && !info.host.starts_with('[') {
+                            format!("[{}]:80", info.host)
+                        } else {
+                            format!("{}:80", info.host)
+                        }
+                    },
                     |h| {
-                        if h.contains(':') {
+                        if h.starts_with('[') {
+                            if h.contains("]:") {
+                                h.to_owned()
+                            } else {
+                                format!("{h}:80")
+                            }
+                        } else if h.contains(':') {
                             h.to_owned()
                         } else {
                             format!("{h}:80")
@@ -3754,7 +3926,7 @@ pub mod desync {
                 );
             let mut upstream = connect_target(&target)?;
             write_desync_stream(&mut upstream, initial, cfg, counters)?;
-            relay_bidirectional(client, upstream)
+            relay_bidirectional_http(client, upstream, cfg.mode != DesyncMode::Off)
         }
     }
 
@@ -3890,6 +4062,55 @@ pub mod desync {
                 let _ = io::copy(&mut c_read, &mut u_write);
                 let _ = u_write.shutdown(Shutdown::Write);
             })?;
+        let _ = io::copy(&mut upstream, &mut client);
+        let _ = client.shutdown(Shutdown::Write);
+        let _ = t.join();
+        Ok(())
+    }
+
+    fn relay_bidirectional_http(
+        mut client: TcpStream,
+        mut upstream: TcpStream,
+        strip_alt_svc: bool,
+    ) -> io::Result<()> {
+        if !strip_alt_svc {
+            return relay_bidirectional(client, upstream);
+        }
+        let _ = client.set_read_timeout(None);
+        let _ = client.set_write_timeout(None);
+        let _ = upstream.set_read_timeout(None);
+        let _ = upstream.set_write_timeout(None);
+        let mut c_read = client.try_clone()?;
+        let mut u_write = upstream.try_clone()?;
+        let t = thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let _ = io::copy(&mut c_read, &mut u_write);
+                let _ = u_write.shutdown(Shutdown::Write);
+            })?;
+
+        let mut head = Vec::with_capacity(2048);
+        let mut tmp = [0u8; 2048];
+        while head.len() < 8192 {
+            let n = upstream.read(&mut tmp)?;
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&tmp[..n]);
+            let maybe_http = if head.len() < 5 {
+                b"HTTP/".starts_with(&head)
+            } else {
+                head.starts_with(b"HTTP/")
+            };
+            if !maybe_http || ascii::scan_pattern(&head, b"\r\n\r\n").is_some() {
+                break;
+            }
+        }
+        if !head.is_empty() {
+            let clean = crate::oblivious::sanitize_http_response(&head, strip_alt_svc);
+            client.write_all(&clean)?;
+            client.flush()?;
+        }
         let _ = io::copy(&mut upstream, &mut client);
         let _ = client.shutdown(Shutdown::Write);
         let _ = t.join();
@@ -4430,9 +4651,10 @@ pub mod relay {
             let _ = stream.set_write_timeout(Some(Duration::from_millis(2000)));
             let _ = stream.set_nodelay(true);
 
-            let mut random = [0x5au8; 32];
-            let now_ns = start.elapsed().as_nanos() as u64;
-            random[0..8].copy_from_slice(&now_ns.to_be_bytes());
+            let mut random = [0u8; 32];
+            for chunk in random.as_chunks_mut::<8>().0 {
+                chunk.copy_from_slice(&crate::probe::random_u64().to_be_bytes());
+            }
             let ch = build_reality_mlkem768_client_hello(
                 &profile.cover_sni,
                 &random,
@@ -4992,6 +5214,39 @@ pub mod oblivious {
         out.extend_from_slice(b"\r\n\r\n");
         out.extend_from_slice(&payload[hdr_end + 4..]);
         (out, stripped_params)
+    }
+
+    /// Strips HTTP/3 `Alt-Svc:` advertisement headers from plaintext HTTP/1.x responses when QUIC
+    /// blocking is active so browsers stay on desynchronized TCP/HTTP2 instead of hitting `ERR_QUIC_PROTOCOL_ERROR`.
+    pub fn sanitize_http_response(payload: &[u8], strip_alt_svc: bool) -> Vec<u8> {
+        if !strip_alt_svc || payload.len() < 12 || !payload.starts_with(b"HTTP/") {
+            return payload.to_vec();
+        }
+        let scan_end = payload.len().min(8192);
+        let Some(hdr_end) = ascii::scan_pattern(&payload[..scan_end], b"\r\n\r\n") else {
+            return payload.to_vec();
+        };
+        let Ok(head_str) = std::str::from_utf8(&payload[..hdr_end]) else {
+            return payload.to_vec();
+        };
+        let mut changed = false;
+        let mut kept: Vec<&str> = Vec::new();
+        for (idx, line) in head_str.split("\r\n").enumerate() {
+            if idx > 0 && ascii::lowercased(line).starts_with("alt-svc:") {
+                changed = true;
+                continue;
+            }
+            kept.push(line);
+        }
+        if !changed {
+            return payload.to_vec();
+        }
+        let new_head = kept.join("\r\n");
+        let mut out = Vec::with_capacity(new_head.len() + 4 + (payload.len() - hdr_end - 4));
+        out.extend_from_slice(new_head.as_bytes());
+        out.extend_from_slice(b"\r\n\r\n");
+        out.extend_from_slice(&payload[hdr_end + 4..]);
+        out
     }
 }
 
@@ -6553,9 +6808,8 @@ pub mod probe {
         }
     }
 
-    /// Non-cryptographic randomness for DNS IDs and QUIC connection IDs: SipHash keyed
-    /// from OS entropy via `RandomState`. Used only for spoofing resistance (RFC 5452),
-    /// never for key material.
+    /// CSPRNG-seeded randomness for DNS TXIDs, QUIC CIDs, and anti-spoofing (RFC 5452).
+    /// Mixes `/dev/urandom` on Unix and `RandomState` (BCryptGenRandom-backed on Windows) with an atomic counter.
     pub fn random_u64() -> u64 {
         use std::hash::{BuildHasher, Hasher};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -6563,6 +6817,16 @@ pub mod probe {
         h.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
         if let Ok(d) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
             h.write_u128(d.as_nanos());
+        }
+        #[cfg(unix)]
+        {
+            if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+                let mut buf = [0u8; 8];
+                if f.read_exact(&mut buf).is_ok() {
+                    h.write(&buf);
+                    return h.finish() ^ u64::from_le_bytes(buf);
+                }
+            }
         }
         h.finish()
     }
@@ -9055,10 +9319,55 @@ pub mod engine {
             crate::desync::encode_desync_output(&out, cfg.mode)
         }
 
-        /// Starts (or restarts) the local unprivileged SOCKS5/HTTP DPI-circumvention proxy.
+        /// Starts (or updates live if already running on the same explicit port) the local proxy.
         pub fn start_proxy(&self, r: &Record) -> Record {
             let cfg = crate::desync::DesyncConfig::from_record(r);
             let mut guard = self.proxy.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(p) = guard.as_ref()
+                && cfg.listen_port != 0
+                && cfg.listen_port == p.port()
+            {
+                let mode = cfg.mode;
+                p.update_config(cfg);
+                let c = p.counters();
+                let mut out = Record::with_status(code::OK);
+                out.int(tags::desync::ACTIVE, 1)
+                    .int(tags::desync::PORT, i64::from(p.port()))
+                    .int(tags::desync::MODE, mode as i64)
+                    .int(
+                        tags::desync::CONNECTIONS,
+                        sat(c.connections.load(Ordering::Relaxed)),
+                    )
+                    .int(
+                        tags::desync::TLS_SPLIT,
+                        sat(c.tls_split.load(Ordering::Relaxed)),
+                    )
+                    .int(
+                        tags::desync::HTTP_SPLIT,
+                        sat(c.http_split.load(Ordering::Relaxed)),
+                    )
+                    .int(
+                        tags::desync::FAKE_SENT,
+                        sat(c.fake_sent.load(Ordering::Relaxed)),
+                    )
+                    .int(
+                        tags::desync::RST_DROPPED,
+                        sat(c.rst_dropped.load(Ordering::Relaxed)),
+                    )
+                    .int(
+                        tags::desync::VISION_SPLICE,
+                        sat(c.vision_splice.load(Ordering::Relaxed)),
+                    )
+                    .int(
+                        tags::desync::TRACKERS_BLOCKED,
+                        sat(c.trackers_blocked.load(Ordering::Relaxed)),
+                    )
+                    .int(
+                        tags::desync::PARAMS_STRIPPED,
+                        sat(c.params_stripped.load(Ordering::Relaxed)),
+                    );
+                return out;
+            }
             if let Some(mut old) = guard.take() {
                 old.stop();
             }

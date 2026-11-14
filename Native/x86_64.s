@@ -120,16 +120,20 @@ freedom_csum_fold:
 .Lcsum_fold64:
     mov     %rax, %r8
     shr     $32, %r8
-    mov     %eax, %eax
-    add     %r8, %rax
+    mov     %eax, %eax                  // zero-extend lower 32 bits into %rax
+    add     %r8, %rax                   // max 0x1_fffffffe (33 bits)
     mov     %rax, %r8
-    shr     $16, %r8
-    and     $0xffff, %eax
-    add     %r8d, %eax
+    shr     $16, %r8                    // max 0x1_ffff
+    and     $0xffff, %eax               // max 0xffff (zero-extended)
+    add     %r8d, %eax                  // max 0x2_fffe
     mov     %eax, %r8d
-    shr     $16, %r8d
-    add     %r8w, %ax
-    movzwl  %ax, %eax
+    shr     $16, %r8d                   // max 2
+    and     $0xffff, %eax
+    add     %r8d, %eax                  // max 0x1_0001
+    mov     %eax, %r8d
+    shr     $16, %r8d                   // 0 or 1
+    and     $0xffff, %eax
+    add     %r8d, %eax                  // max 0xffff
     ret
 
 .globl freedom_csum_delta
